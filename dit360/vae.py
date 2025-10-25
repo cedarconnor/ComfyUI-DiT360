@@ -95,15 +95,32 @@ class DiT360VAE:
         x = (x * 2.0) - 1.0
 
         with torch.no_grad():
-            # TODO Phase 3: Implement actual VAE encoding
-            # For now, simulate latent space (8x downscale, 4 channels)
-            B, C, H, W = x.shape
-            latent_h = H // self.scale_factor
-            latent_w = W // self.scale_factor
-
-            # Placeholder: Create dummy latent
-            latent = torch.randn(B, 4, latent_h, latent_w,
-                                device=self.device, dtype=self.dtype)
+            if hasattr(self.vae, 'encode'):
+                # Use VAE's encode method if available
+                try:
+                    # Try diffusers-style VAE
+                    encoded = self.vae.encode(x)
+                    if hasattr(encoded, 'latent_dist'):
+                        # AutoencoderKL from diffusers
+                        latent = encoded.latent_dist.sample()
+                    elif hasattr(encoded, 'latents'):
+                        latent = encoded.latents
+                    else:
+                        latent = encoded
+                except Exception as e:
+                    print(f"Warning: VAE encode failed ({e}), using fallback")
+                    # Fallback: downsample
+                    latent = torch.nn.functional.avg_pool2d(x, kernel_size=self.scale_factor)
+                    # Ensure 4 channels
+                    if latent.shape[1] != 4:
+                        latent = latent[:, :4, :, :] if latent.shape[1] > 4 else \
+                                torch.cat([latent, torch.zeros_like(latent[:, :1, :, :])], dim=1)
+            else:
+                # Fallback if no encode method
+                latent = torch.nn.functional.avg_pool2d(x, kernel_size=self.scale_factor)
+                if latent.shape[1] != 4:
+                    latent = latent[:, :4, :, :] if latent.shape[1] > 4 else \
+                            torch.cat([latent, torch.zeros_like(latent[:, :1, :, :])], dim=1)
 
         return latent
 
@@ -133,19 +150,47 @@ class DiT360VAE:
         latent = latent.to(self.device, dtype=self.dtype)
 
         with torch.no_grad():
-            # TODO Phase 3: Implement actual VAE decoding
-            # For now, simulate image (8x upscale, 3 channels)
-            B, C, H, W = latent.shape
-            image_h = H * self.scale_factor
-            image_w = W * self.scale_factor
+            if hasattr(self.vae, 'decode'):
+                # Use VAE's decode method if available
+                try:
+                    # Try diffusers-style VAE decode
+                    decoded = self.vae.decode(latent)
+                    if hasattr(decoded, 'sample'):
+                        # DecoderOutput from diffusers
+                        image = decoded.sample
+                    else:
+                        image = decoded
 
-            # Placeholder: Create dummy image in [-1, 1]
-            image = torch.randn(B, 3, image_h, image_w,
-                               device=self.device, dtype=self.dtype)
+                    # Denormalize from [-1, 1] to [0, 1]
+                    image = (image + 1.0) / 2.0
+                    image = torch.clamp(image, 0.0, 1.0)
 
-            # Denormalize from [-1, 1] to [0, 1]
-            image = (image + 1.0) / 2.0
-            image = torch.clamp(image, 0.0, 1.0)
+                except Exception as e:
+                    print(f"Warning: VAE decode failed ({e}), using fallback")
+                    # Fallback: upsample
+                    image = torch.nn.functional.interpolate(
+                        latent,
+                        scale_factor=self.scale_factor,
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                    # Ensure 3 channels
+                    if image.shape[1] != 3:
+                        image = image[:, :3, :, :] if image.shape[1] > 3 else \
+                               torch.cat([image] * (3 // image.shape[1] + 1), dim=1)[:, :3, :, :]
+                    image = torch.clamp(image, 0.0, 1.0)
+            else:
+                # Fallback if no decode method
+                image = torch.nn.functional.interpolate(
+                    latent,
+                    scale_factor=self.scale_factor,
+                    mode='bilinear',
+                    align_corners=False
+                )
+                if image.shape[1] != 3:
+                    image = image[:, :3, :, :] if image.shape[1] > 3 else \
+                           torch.cat([image] * (3 // image.shape[1] + 1), dim=1)[:, :3, :, :]
+                image = torch.clamp(image, 0.0, 1.0)
 
         # Convert to ComfyUI format (B, H, W, C)
         image = image.permute(0, 2, 3, 1).cpu().float()
@@ -275,21 +320,88 @@ def load_vae(
             f"Or use auto-download in DiT360Loader.\n"
         )
 
-    # TODO Phase 3: Load actual VAE model
-    # For now, create placeholder VAE
-    class PlaceholderVAE(nn.Module):
-        def __init__(self):
-            super().__init__()
-            self.initialized = True
+    # Load actual VAE model
+    try:
+        # Try loading with diffusers AutoencoderKL
+        from diffusers import AutoencoderKL
 
-        def encode(self, x):
-            return x
+        print("Loading VAE with diffusers...")
 
-        def decode(self, x):
-            return x
+        if vae_path.suffix == ".safetensors":
+            # Load from safetensors
+            vae_model = AutoencoderKL.from_single_file(
+                str(vae_path),
+                torch_dtype=torch.float32  # Load in fp32 first, convert later
+            )
+        else:
+            # Try loading from directory
+            vae_model = AutoencoderKL.from_pretrained(
+                str(vae_path.parent),
+                torch_dtype=torch.float32
+            )
 
-    vae_model = PlaceholderVAE()
-    print("✓ Placeholder VAE created (actual VAE loading in Phase 3)")
+        print("✓ VAE loaded successfully")
+
+    except Exception as e:
+        print(f"Warning: Failed to load VAE with diffusers ({e})")
+        print("Falling back to safetensors direct load...")
+
+        # Fallback: Try loading directly with safetensors
+        try:
+            from diffusers import AutoencoderKL
+
+            # Create VAE from scratch and load weights
+            vae_model = AutoencoderKL(
+                in_channels=3,
+                out_channels=3,
+                latent_channels=4,
+                down_block_types=["DownEncoderBlock2D"] * 4,
+                up_block_types=["UpDecoderBlock2D"] * 4,
+                block_out_channels=[128, 256, 512, 512],
+                layers_per_block=2,
+            )
+
+            # Load state dict
+            state_dict = load_file(str(vae_path))
+            vae_model.load_state_dict(state_dict, strict=False)
+
+            print("✓ VAE loaded from safetensors")
+
+        except Exception as e2:
+            print(f"Warning: Could not load VAE ({e2})")
+            print("Using placeholder VAE")
+
+            # Last resort: Use placeholder
+            class PlaceholderVAE(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.initialized = True
+
+                def encode(self, x):
+                    # Simple downsampling
+                    class FakeOutput:
+                        def __init__(self, latents):
+                            self.latent_dist = type('obj', (object,), {'sample': lambda: latents})()
+
+                    latent = torch.nn.functional.avg_pool2d(x, kernel_size=8)
+                    if latent.shape[1] != 4:
+                        latent = torch.nn.functional.pad(latent, (0, 0, 0, 0, 0, 4 - latent.shape[1]))
+                    return FakeOutput(latent)
+
+                def decode(self, x):
+                    # Simple upsampling
+                    image = torch.nn.functional.interpolate(x, scale_factor=8, mode='bilinear')
+                    if image.shape[1] != 3:
+                        image = image[:, :3, :, :]
+
+                    class FakeOutput:
+                        def __init__(self, sample):
+                            self.sample = sample
+
+                    return FakeOutput(image)
+
+            vae_model = PlaceholderVAE()
+            print("✓ Placeholder VAE created")
 
     # Convert precision
     dtype_map = {

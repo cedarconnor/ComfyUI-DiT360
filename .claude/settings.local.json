@@ -4,7 +4,12 @@
       "Bash(mkdir:*)",
       "Bash(python tests/test_utils.py:*)",
       "Bash(git init:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$(cat <<''EOF''\nPhase 2 Complete: Model Loading Infrastructure\n\nAdded complete model loading system for DiT360, VAE, and T5-XXL.\n\nFeatures:\n- DiT360Model architecture wrapper with FLUX.1-dev config\n- VAE encoder/decoder with 8x scaling support\n- T5-XXL text encoder integration\n- HuggingFace Hub auto-download\n- Smart path resolution (filename/relative/absolute)\n- Multi-precision support (fp32/fp16/bf16/fp8)\n- Device management (GPU/CPU offloading)\n- Graceful error handling\n\nUpdated Nodes:\n- DiT360Loader: Now loads actual models\n- DiT360TextEncode: Real text preprocessing\n\nFiles Added:\n- dit360/model.py (384 lines)\n- dit360/vae.py (315 lines)\n- dit360/conditioning.py (375 lines)\n- tests/validate_structure.py\n- PHASE2_COMPLETE.md\n\nStats:\n- 3,092 total lines of code\n- All validations passing\n- 20% project complete (2/10 phases)\nEOF\n)\")",
+      "Bash(git remote add:*)",
+      "Bash(git push:*)",
+      "WebSearch",
+      "Bash(python:*)"
     ],
     "deny": [],
     "ask": []

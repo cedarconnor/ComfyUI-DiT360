@@ -448,21 +448,97 @@ class DiT360Sampler:
         latent_height = height // 8
         latent_width = width // 8
 
+        #================================================================
+        # Phase 3: Actual generation loop with flow matching
+        # ================================================================
+
+        from .dit360 import FlowMatchScheduler
+
+        # Get components from pipeline
+        model_wrapper = dit360_pipe["model"]
+        model = model_wrapper.model  # Unwrap the DiT360Model
+        text_encoder = dit360_pipe["text_encoder"]
+
+        # Load model to device
+        model_wrapper.load_to_device()
+
+        # Get prompt embeddings from conditioning
+        prompt_embeds = conditioning["prompt_embeds"]
+        negative_prompt_embeds = conditioning.get("negative_prompt_embeds", None)
+
+        # Initialize scheduler
+        scheduler = FlowMatchScheduler(
+            num_train_timesteps=1000,
+            shift=1.0
+        )
+        scheduler.set_timesteps(steps, device=device)
+
         # Initialize or use existing latent
         if latent_image is not None:
-            latent = latent_image["samples"].clone()
-            print(f"Using input latent: {latent.shape}")
+            # Img2img: Start from existing latent with noise
+            latent_clean = latent_image["samples"].clone().to(device, dtype=dtype)
+
+            # Add noise based on denoise strength
+            noise = torch.randn_like(latent_clean)
+            t_start = int((1.0 - denoise) * steps)
+            timestep = scheduler.timesteps[t_start] if t_start < len(scheduler.timesteps) else torch.tensor([1.0], device=device)
+
+            # Mix clean and noise
+            latent = scheduler.add_noise(latent_clean, noise, timestep)
+            print(f"Using input latent: {latent.shape}, denoise={denoise}, start_step={t_start}")
+
+            # Adjust scheduler to start from t_start
+            scheduler.timesteps = scheduler.timesteps[t_start:]
+
         else:
+            # Text-to-image: Start from pure noise
             latent = torch.randn(1, 4, latent_height, latent_width, device=device, dtype=dtype)
             print(f"Initialized random latent: {latent.shape}")
 
-        # Placeholder: simulate sampling with progress bar
-        pbar = comfy.utils.ProgressBar(steps)
-        for step in range(steps):
-            # TODO: Actual sampling loop with circular padding
+        # Sampling loop with flow matching
+        print(f"\nStarting generation loop...")
+        pbar = comfy.utils.ProgressBar(len(scheduler.timesteps))
+
+        for i, t in enumerate(scheduler.timesteps):
+            # Prepare timestep tensor
+            timestep = torch.tensor([t], device=device)
+
+            # Classifier-free guidance: Run model twice if we have negative prompt
+            if cfg_scale != 1.0 and negative_prompt_embeds is not None:
+                # Concatenate latents for batched inference
+                latent_model_input = torch.cat([latent, latent], dim=0)
+                timestep_input = torch.cat([timestep, timestep], dim=0)
+
+                # Concatenate embeddings (positive and negative)
+                context = torch.cat([prompt_embeds, negative_prompt_embeds], dim=0)
+
+                # Single forward pass for both
+                noise_pred = model(latent_model_input, timestep_input, context)
+
+                # Split predictions
+                noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2, dim=0)
+
+                # Apply CFG: pred = uncond + cfg_scale * (cond - uncond)
+                noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
+
+            else:
+                # No CFG: single forward pass
+                noise_pred = model(latent, timestep, prompt_embeds)
+
+            # Apply scheduler step to update latent
+            latent = scheduler.step(
+                model_output=noise_pred,
+                timestep=t.item(),
+                sample=latent
+            )
+
+            # Progress update
             pbar.update(1)
 
-        print("✓ Generation complete (placeholder - Phase 4)")
+        # Offload model to save VRAM
+        model_wrapper.offload()
+
+        print("✓ Generation complete!")
 
         # Return in ComfyUI LATENT format
         return ({"samples": latent},)
@@ -503,23 +579,23 @@ class DiT360Decode:
     CATEGORY = "DiT360"
 
     def decode(self, samples, dit360_pipe, auto_blend_edges):
-        """Decode latents to images"""
+        """Decode latents to images using VAE"""
 
         print(f"\nDecoding latents to image...")
         print(f"Auto blend edges: {auto_blend_edges}")
 
-        # TODO: Implement actual VAE decoding in Phase 5
-        # For now, create dummy image output
-
+        # Phase 3: Actual VAE decoding
         latent = samples["samples"]
         batch, channels, latent_h, latent_w = latent.shape
 
-        # Image is 8x upscale of latent
-        height = latent_h * 8
-        width = latent_w * 8
+        # Get VAE from pipeline
+        vae = dit360_pipe["vae"]
 
-        # Create dummy image in ComfyUI format (B, H, W, C)
-        image = torch.rand(batch, height, width, 3)
+        # Decode using VAE
+        image = vae.decode(latent, use_tiling=False)
+
+        # Image dimensions
+        height, width = image.shape[1], image.shape[2]
 
         # Apply edge blending if enabled
         if auto_blend_edges:
@@ -527,7 +603,7 @@ class DiT360Decode:
             image = blend_edges(image, blend_width=10, mode="cosine")
             print("✓ Edges blended for seamless wraparound")
 
-        print(f"✓ Decoded to {width}×{height} image (placeholder - Phase 5)")
+        print(f"✓ Decoded to {width}×{height} image")
 
         return (image,)
 

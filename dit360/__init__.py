@@ -29,6 +29,13 @@ from .conditioning import (
     text_preprocessing,
 )
 
+from .scheduler import (
+    FlowMatchScheduler,
+    CFGFlowMatchScheduler,
+    get_timestep_schedule,
+    compute_snr,
+)
+
 __all__ = [
     # Model
     'DiT360Model',
@@ -45,4 +52,9 @@ __all__ = [
     'load_t5_encoder',
     'download_t5_from_huggingface',
     'text_preprocessing',
+    # Scheduler
+    'FlowMatchScheduler',
+    'CFGFlowMatchScheduler',
+    'get_timestep_schedule',
+    'compute_snr',
 ]
