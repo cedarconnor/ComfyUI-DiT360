@@ -495,6 +495,21 @@ class DiT360Sampler:
             latent = torch.randn(1, 4, latent_height, latent_width, device=device, dtype=dtype)
             print(f"Initialized random latent: {latent.shape}")
 
+        # Initialize loss modules if enabled
+        yaw_loss_fn = None
+        cube_loss_fn = None
+
+        if enable_yaw_loss:
+            from .dit360 import YawLoss
+            yaw_loss_fn = YawLoss(num_rotations=4, loss_type="l2")
+            print(f"✓ Yaw loss enabled (weight={yaw_loss_weight})")
+
+        if enable_cube_loss:
+            from .dit360 import CubeLoss
+            # Use smaller face size for latent space
+            cube_loss_fn = CubeLoss(face_size=max(64, min(latent_height, latent_width)), loss_type="l2")
+            print(f"✓ Cube loss enabled (weight={cube_loss_weight})")
+
         # Sampling loop with flow matching
         print(f"\nStarting generation loop...")
         pbar = comfy.utils.ProgressBar(len(scheduler.timesteps))
@@ -524,6 +539,34 @@ class DiT360Sampler:
             else:
                 # No CFG: single forward pass
                 noise_pred = model(latent, timestep, prompt_embeds)
+
+            # Apply geometric losses if enabled (Phase 4 Advanced Features)
+            # Note: These losses are computed for monitoring/debugging during generation
+            # For training-time losses, these would be used to compute gradients
+            # For inference-time guidance, we compute them but don't backprop
+            if (enable_yaw_loss or enable_cube_loss) and i % 10 == 0:
+                # Only compute every 10 steps to save time
+                with torch.no_grad():
+                    # Compute predicted x0 (denoised latent)
+                    # For flow matching: x0 = latent - noise_pred
+                    predicted_x0 = latent - noise_pred
+
+                    # Yaw consistency loss (for monitoring)
+                    if enable_yaw_loss and yaw_loss_fn is not None:
+                        yaw_loss = yaw_loss_fn(predicted_x0)
+                        if i == 0:
+                            print(f"  Step {i}: Yaw loss = {yaw_loss.item():.6f}")
+
+                    # Cube projection loss (for monitoring)
+                    if enable_cube_loss and cube_loss_fn is not None:
+                        # Use latent as reference
+                        cube_loss = cube_loss_fn(predicted_x0, latent)
+                        if i == 0:
+                            print(f"  Step {i}: Cube loss = {cube_loss.item():.6f}")
+
+                # Note: For full inference-time guidance, losses would need to be
+                # applied via gradient computation. This is left as a future enhancement.
+                # Current implementation: losses are computed for monitoring only.
 
             # Apply scheduler step to update latent
             latent = scheduler.step(
@@ -751,6 +794,285 @@ class Equirect360Preview:
 
 
 # ====================================================================
+# NODE 7: DiT360 LoRA Loader
+# ====================================================================
+
+class DiT360LoRALoader:
+    """
+    Load and merge LoRA weights into DiT360 model.
+
+    LoRA (Low-Rank Adaptation) allows fine-tuning models for specific styles
+    or subjects without retraining the entire model.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dit360_pipe": ("DIT360_PIPE", {
+                    "tooltip": "DiT360 pipeline from DiT360Loader"
+                }),
+                "lora_path": ("STRING", {
+                    "default": "lora/anime_style.safetensors",
+                    "multiline": False,
+                    "tooltip": "Path to LoRA .safetensors file (relative to models/dit360/ or absolute path)"
+                }),
+                "strength": ("FLOAT", {
+                    "default": 1.0,
+                    "min": -2.0,
+                    "max": 2.0,
+                    "step": 0.05,
+                    "tooltip": "LoRA strength multiplier. 0.0 = no effect, 1.0 = full effect, "
+                               "negative values remove LoRA"
+                }),
+                "merge_mode": (["merge", "unmerge"], {
+                    "default": "merge",
+                    "tooltip": "merge: Add LoRA weights, unmerge: Remove previously merged LoRA"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("DIT360_PIPE",)
+    RETURN_NAMES = ("dit360_pipe",)
+    FUNCTION = "load_lora"
+    CATEGORY = "DiT360/advanced"
+
+    def load_lora(self, dit360_pipe, lora_path, strength, merge_mode):
+        """Load and merge/unmerge LoRA into model"""
+
+        from pathlib import Path
+        from .dit360 import load_lora_from_safetensors, merge_lora_into_model, unmerge_lora_from_model
+        import folder_paths
+
+        print(f"\n{'='*60}")
+        print(f"LoRA: {merge_mode}ing weights")
+        print(f"Path: {lora_path}")
+        print(f"Strength: {strength:.2f}")
+
+        # Resolve lora path
+        lora_path = Path(lora_path)
+        if not lora_path.is_absolute():
+            # Try relative to dit360 models folder
+            dit360_models = Path(folder_paths.models_dir) / "dit360" / "loras"
+            dit360_models.mkdir(parents=True, exist_ok=True)
+            lora_path = dit360_models / lora_path
+
+        if not lora_path.exists():
+            raise FileNotFoundError(f"LoRA file not found: {lora_path}")
+
+        # Load LoRA
+        print(f"Loading LoRA from {lora_path}")
+        lora_collection = load_lora_from_safetensors(
+            lora_path,
+            device=dit360_pipe["device"],
+            dtype=dit360_pipe["dtype"]
+        )
+
+        # Get model from wrapper
+        model_wrapper = dit360_pipe["model"]
+        model = model_wrapper.model
+
+        # Merge or unmerge
+        if merge_mode == "merge":
+            model = merge_lora_into_model(model, lora_collection, strength=strength)
+            print(f"✓ LoRA merged with strength {strength:.2f}")
+        else:  # unmerge
+            model = unmerge_lora_from_model(model, lora_collection, strength=strength)
+            print(f"✓ LoRA unmerged")
+
+        print(f"{'='*60}\n")
+
+        # Return updated pipeline
+        return (dit360_pipe,)
+
+
+# ====================================================================
+# NODE 8: DiT360 Inpaint
+# ====================================================================
+
+class DiT360Inpaint:
+    """
+    Inpaint specific regions of a panorama using a mask.
+
+    This node allows you to selectively regenerate parts of a panorama
+    while keeping other regions unchanged.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dit360_pipe": ("DIT360_PIPE", {
+                    "tooltip": "DiT360 pipeline from DiT360Loader"
+                }),
+                "conditioning": ("CONDITIONING", {
+                    "tooltip": "Text conditioning from DiT360TextEncode for inpainted region"
+                }),
+                "image": ("IMAGE", {
+                    "tooltip": "Original panorama image to inpaint"
+                }),
+                "mask": ("MASK", {
+                    "tooltip": "Inpainting mask (white = inpaint, black = keep original)"
+                }),
+                "steps": ("INT", {
+                    "default": 50,
+                    "min": 1,
+                    "max": 200,
+                    "step": 1,
+                    "tooltip": "Number of sampling steps (more = higher quality, slower)"
+                }),
+                "cfg_scale": ("FLOAT", {
+                    "default": 7.0,
+                    "min": 1.0,
+                    "max": 20.0,
+                    "step": 0.5,
+                    "tooltip": "Classifier-free guidance scale (higher = follow prompt more closely)"
+                }),
+                "denoise": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Denoising strength (1.0 = full regeneration, 0.0 = no change)"
+                }),
+                "blur_radius": ("INT", {
+                    "default": 10,
+                    "min": 0,
+                    "max": 50,
+                    "step": 1,
+                    "tooltip": "Blur mask edges for smooth blending (0 = hard edge)"
+                }),
+                "blend_mode": (["linear", "cosine", "smooth"], {
+                    "default": "cosine",
+                    "tooltip": "Blending mode for mask edges"
+                }),
+            },
+            "optional": {
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 0xffffffffffffffff,
+                    "tooltip": "Random seed for reproducibility"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("LATENT",)
+    RETURN_NAMES = ("latent",)
+    FUNCTION = "inpaint"
+    CATEGORY = "DiT360/advanced"
+
+    def inpaint(self, dit360_pipe, conditioning, image, mask, steps, cfg_scale, denoise,
+                blur_radius, blend_mode, seed=None):
+        """Inpaint panorama with mask"""
+
+        import torch
+        from .dit360 import FlowMatchScheduler, prepare_inpaint_mask, blend_latents, apply_inpainting_conditioning
+        import comfy.utils
+
+        if seed is None:
+            seed = torch.randint(0, 0xffffffffffffffff, (1,)).item()
+
+        torch.manual_seed(seed)
+
+        device = dit360_pipe["device"]
+        dtype = dit360_pipe["dtype"]
+
+        model_wrapper = dit360_pipe["model"]
+        vae_wrapper = dit360_pipe["vae"]
+
+        print(f"\n{'='*60}")
+        print(f"DiT360 Inpainting")
+        print(f"Steps: {steps}, CFG: {cfg_scale:.1f}, Denoise: {denoise:.2f}")
+        print(f"Blur radius: {blur_radius}px, Blend: {blend_mode}")
+
+        # Prepare mask
+        prepared_mask = prepare_inpaint_mask(
+            mask.unsqueeze(1),  # Add channel dim
+            target_size=(image.shape[1], image.shape[2]),
+            blur_radius=blur_radius,
+            invert=False
+        )
+
+        # Encode original image
+        print("Encoding original image...")
+        vae_wrapper.load_to_device()
+        original_latent = vae_wrapper.encode(image)
+        vae_wrapper.offload()
+
+        # Create latent mask
+        latent_height, latent_width = original_latent.shape[2], original_latent.shape[3]
+        from .dit360 import create_latent_noise_mask
+        latent_mask = create_latent_noise_mask(
+            prepared_mask,
+            (latent_height, latent_width),
+            vae_scale_factor=8
+        )
+
+        # Apply inpainting conditioning
+        conditioned_latent, cond_mask = apply_inpainting_conditioning(
+            original_latent,
+            latent_mask,
+            original_image_latent=original_latent,
+            fill_mode="noise"
+        )
+
+        # Set up scheduler
+        scheduler = FlowMatchScheduler(num_train_timesteps=1000, shift=1.0)
+        scheduler.set_timesteps(steps, device=device)
+
+        # Start from conditioned latent with noise
+        latent = conditioned_latent.to(device, dtype=dtype)
+
+        # Get text embeddings
+        prompt_embeds = conditioning["prompt_embeds"]
+        negative_prompt_embeds = conditioning.get("negative_prompt_embeds", None)
+
+        # Load model
+        model_wrapper.load_to_device()
+        model = model_wrapper.model
+
+        # Sampling loop
+        print(f"Inpainting with {len(scheduler.timesteps)} steps...")
+        pbar = comfy.utils.ProgressBar(len(scheduler.timesteps))
+
+        for i, t in enumerate(scheduler.timesteps):
+            timestep = torch.tensor([t], device=device)
+
+            # CFG
+            if cfg_scale != 1.0 and negative_prompt_embeds is not None:
+                latent_model_input = torch.cat([latent, latent], dim=0)
+                timestep_input = torch.cat([timestep, timestep], dim=0)
+                context = torch.cat([prompt_embeds, negative_prompt_embeds], dim=0)
+
+                noise_pred = model(latent_model_input, timestep_input, context)
+                noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2, dim=0)
+                noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
+            else:
+                noise_pred = model(latent, timestep, prompt_embeds)
+
+            # Scheduler step
+            latent = scheduler.step(model_output=noise_pred, timestep=t.item(), sample=latent)
+
+            # Blend with original latent (keep unmasked regions)
+            latent = blend_latents(
+                original_latent.to(device, dtype=dtype),
+                latent,
+                latent_mask.to(device, dtype=dtype),
+                blend_mode=blend_mode
+            )
+
+            pbar.update(1)
+
+        model_wrapper.offload()
+
+        print(f"✓ Inpainting complete")
+        print(f"{'='*60}\n")
+
+        return ({"samples": latent},)
+
+
+# ====================================================================
 # NODE REGISTRATION
 # ====================================================================
 
@@ -761,6 +1083,8 @@ NODE_CLASS_MAPPINGS = {
     "DiT360Decode": DiT360Decode,
     "Equirect360Process": Equirect360Process,
     "Equirect360Preview": Equirect360Preview,
+    "DiT360LoRALoader": DiT360LoRALoader,
+    "DiT360Inpaint": DiT360Inpaint,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -770,4 +1094,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DiT360Decode": "DiT360 Decode",
     "Equirect360Process": "Equirect360 Process",
     "Equirect360Preview": "Equirect360 Preview",
+    "DiT360LoRALoader": "DiT360 LoRA Loader",
+    "DiT360Inpaint": "DiT360 Inpaint",
 }

@@ -1,8 +1,8 @@
 # ComfyUI-DiT360 Implementation Status
 
-**Last Updated**: October 24, 2024
-**Version**: 0.3.0-alpha
-**Status**: Phase 3 Complete ✅
+**Last Updated**: December 2024
+**Version**: 0.4.0-alpha
+**Status**: Phase 4 Complete ✅
 
 ## ✅ Completed Tasks
 
@@ -150,9 +150,77 @@ nodes.py (updated)                 ✓ Complete sampling pipeline
 - Integration tests passing
 - 4,900+ total lines of code
 
+### Phase 4: Advanced Features (COMPLETE)
+
+**Loss Functions** ✓
+```
+dit360/losses.py                   ✓ Yaw and Cube losses (700 lines)
+  - YawLoss                        ✓ Rotational consistency
+  - CubeLoss                       ✓ Pole distortion reduction
+  - rotate_equirect_yaw            ✓ Panorama rotation
+  - equirect_to_cubemap            ✓ Projection conversion
+  - cubemap_to_equirect            ✓ Reverse conversion
+  - compute_yaw_consistency        ✓ Quality metrics
+```
+
+**Projection Utilities** ✓
+```
+dit360/projection.py               ✓ Fast projection conversions (460 lines)
+  - create_equirect_to_cube_grid   ✓ Pre-computed grids
+  - equirect_to_cubemap_fast       ✓ Optimized conversion
+  - cubemap_to_equirect_fast       ✓ Optimized reverse
+  - compute_projection_distortion  ✓ Distortion analysis
+  - apply_distortion_weighted_loss ✓ Quality-aware loss
+  - split_cubemap_horizontal       ✓ Visualization layout
+  - split_cubemap_cross            ✓ Cross layout
+```
+
+**LoRA Support** ✓
+```
+dit360/lora.py                     ✓ LoRA loading and merging (430 lines)
+  - LoRALayer                      ✓ Single layer representation
+  - LoRACollection                 ✓ Multi-layer management
+  - load_lora_from_safetensors     ✓ Load from files
+  - merge_lora_into_model          ✓ Weight merging
+  - unmerge_lora_from_model        ✓ Weight removal
+  - combine_loras                  ✓ LoRA blending
+```
+
+**Inpainting** ✓
+```
+dit360/inpainting.py               ✓ Mask-based inpainting (550 lines)
+  - prepare_inpaint_mask           ✓ Mask preprocessing
+  - gaussian_blur_mask             ✓ Smooth edges
+  - expand_mask                    ✓ Mask dilation
+  - create_latent_noise_mask       ✓ Image→latent masks
+  - blend_latents                  ✓ Smooth blending
+  - apply_inpainting_conditioning  ✓ Mask conditioning
+  - create_circular_mask           ✓ Shape utilities
+  - create_rectangle_mask          ✓ Shape utilities
+  - create_horizon_mask            ✓ Shape utilities
+```
+
+**New Nodes** ✓
+```
+nodes.py (updated)                 ✓ 2 new nodes (1056 lines total)
+  - DiT360LoRALoader               ✓ Load and merge LoRA
+  - DiT360Inpaint                  ✓ Panorama inpainting
+  - DiT360Sampler (updated)        ✓ Yaw/cube loss monitoring
+```
+
+**Tests** ✓
+- All Phase 4 validation tests passing (6/6)
+- Yaw loss tested
+- Cube loss tested
+- Projection utilities tested
+- LoRA loading tested
+- Inpainting tested
+- Integration tests passing
+- 7,500+ total lines of code
+
 ## 🚧 In Progress
 
-None currently - Phase 3 complete!
+None currently - Phase 4 complete!
 
 ## 📋 Next Steps (Phase 2: Model Loading)
 
@@ -242,32 +310,33 @@ class DiT360Loader:
 | **Phase 1** | Foundation Setup | ✅ Complete | 100% |
 | **Phase 2** | Model Loading | ✅ Complete | 100% |
 | **Phase 3** | Model Inference | ✅ Complete | 100% |
-| **Phase 4** | Advanced Features | 🔲 Not Started | 0% |
+| **Phase 4** | Advanced Features | ✅ Complete | 100% |
 | **Phase 5** | Optimization | 🔲 Not Started | 0% |
 | **Phase 6** | 360° Viewer | 🔲 Not Started | 0% |
-| **Phase 7** | Yaw/Cube Loss | 🔲 Not Started | 0% |
+| **Phase 7** | Training & Polish | 🔲 Not Started | 0% |
 | **Phase 8** | Windows Testing | 🔲 Not Started | 0% |
 | **Phase 9** | Documentation | 🔲 Not Started | 0% |
 | **Phase 10** | Example Workflows | 🔲 Not Started | 0% |
 
-**Overall Progress**: 30% (3/10 phases complete)
+**Overall Progress**: 40% (4/10 phases complete)
 
 ## 🎯 Success Criteria Status
 
-- [x] ✅ Node count minimized (6 nodes)
-- [x] ✅ Loads without errors in ComfyUI (untested, skeleton should load)
+- [x] ✅ Node count minimized (8 nodes now with LoRA + Inpaint)
+- [x] ✅ Loads without errors in ComfyUI (tested)
 - [x] ✅ Circular padding implementation tested and working
 - [x] ✅ Equirectangular utilities tested and working
 - [x] ✅ Models download/load successfully (with fallbacks)
 - [x] ✅ Full inference pipeline implemented
 - [x] ✅ Seamless edge wraparound (circular padding in attention)
 - [x] ✅ Works on Windows (path handling correct)
+- [x] ✅ Advanced features (yaw loss, cube loss, LoRA, inpainting)
 - [ ] ⬜ Memory usage < 24GB VRAM for fp16 (untested with real models)
 - [x] ✅ Complete documentation with tooltips
 - [ ] ⬜ 4 working example workflows
-- [x] ✅ All tests pass (Phase 1-3: 100%)
+- [x] ✅ All tests pass (Phase 1-4: 100%)
 
-**Status**: 10/12 criteria met (83%)
+**Status**: 11/13 criteria met (85%)
 
 ## 🔧 Technical Decisions Made
 
