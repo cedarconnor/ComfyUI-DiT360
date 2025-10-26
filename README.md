@@ -1,3 +1,6 @@
+NOT WORKING YET!!!!!
+
+
 # ComfyUI-DiT360
 
 **360° Panorama Generation Enhancement Nodes for ComfyUI**
