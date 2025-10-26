@@ -295,7 +295,7 @@ ComfyUI-DiT360/
 │   └── js/
 │       └── ✅ equirect360_viewer.js (Three.js)
 ├── examples/
-│   └── ✅ basic_workflow.json
+│   └── ✅ basic_360_workflow.json
 └── tests/
     ├── ✅ test_circular_padding.py
     ├── ✅ test_equirect.py

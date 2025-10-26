@@ -758,6 +758,9 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 
 ## PHASE 4: Implement Actual Sampling
 
+> **Update (v2.0.0):** The final node implementation now applies gradient-based yaw and cube regularisation inside `Equirect360KSampler`. The historical step-by-step scaffold below is preserved for context, but consult `nodes.py` for the production code path.
+
+
 ### Step 4.1: Understanding ComfyUI's Sampling System
 
 ComfyUI's sampling is complex. Key points:

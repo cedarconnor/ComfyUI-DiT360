@@ -23,6 +23,17 @@ from .padding import (
     create_circular_padding_wrapper,
 )
 
+
+def validate_circular_continuity(image, threshold: float = 0.05) -> bool:
+    """
+    Backwards-compatible alias for :func:`check_edge_continuity`.
+
+    Several internal docs and examples still reference the older helper name.
+    Keeping the alias avoids breaking those references while steering new code
+    toward ``check_edge_continuity``.
+    """
+    return check_edge_continuity(image, threshold)
+
 __all__ = [
     # Aspect Ratio
     'validate_aspect_ratio',
@@ -31,6 +42,7 @@ __all__ = [
     # Edge Blending
     'blend_edges',
     'check_edge_continuity',
+    'validate_circular_continuity',
     # Circular Padding
     'apply_circular_padding',
     'remove_circular_padding',

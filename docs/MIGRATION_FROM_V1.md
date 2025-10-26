@@ -324,7 +324,7 @@ padding and post-processing to make panoramas seamless.
 8. **360° Viewer** (interactive preview) ← Our node
 9. **Save Image** ← Standard node
 
-See examples/basic_workflow.json
+See examples/basic_360_workflow.json
 
 ## Nodes
 

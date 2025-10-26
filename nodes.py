@@ -41,6 +41,8 @@ from .dit360.losses import (
     CubeLoss,
     rotate_equirect_yaw,
     compute_yaw_consistency,
+    equirect_to_cubemap,
+    cubemap_to_equirect,
 )
 
 
@@ -197,17 +199,54 @@ class Equirect360KSampler:
         # Create callback for loss application
         if enable_yaw_loss or enable_cube_loss:
             def loss_callback(step, x0, x, total_steps):
-                """Apply geometric losses during sampling"""
-                # Note: This is a simplified implementation
-                # In practice, losses would be applied to predicted x0 or noise predictions
-                # For now, we just log that losses are active
-                if step % 5 == 0:  # Only log every 5 steps
-                    loss_info = []
-                    if enable_yaw_loss:
-                        loss_info.append("yaw")
-                    if enable_cube_loss:
-                        loss_info.append("cube")
-                    print(f"  Step {step}/{total_steps}: Applying {'+'.join(loss_info)} loss")
+                """Apply geometric losses during sampling."""
+
+                loss_terms = []
+
+                try:
+                    with torch.enable_grad():
+                        x0_detached = x0.detach().requires_grad_(True)
+
+                        if enable_yaw_loss and yaw_loss_fn is not None:
+                            yaw_loss_value = yaw_loss_fn(x0_detached) * yaw_loss_weight
+                            if torch.isfinite(yaw_loss_value):
+                                loss_terms.append(yaw_loss_value)
+
+                        if enable_cube_loss and cube_loss_fn is not None:
+                            face_limit = max(16, min(cube_loss_fn.face_size, x0_detached.shape[3] // 2))
+                            cube_loss_fn.face_size = int(face_limit)
+
+                            with torch.no_grad():
+                                target_faces = equirect_to_cubemap(
+                                    x0.detach(),
+                                    face_size=cube_loss_fn.face_size
+                                )
+                                target_reproj = cubemap_to_equirect(
+                                    target_faces,
+                                    height=x0.shape[2],
+                                    width=x0.shape[3]
+                                )
+
+                            cube_loss_value = cube_loss_fn(x0_detached, target_reproj) * cube_loss_weight
+                            if torch.isfinite(cube_loss_value):
+                                loss_terms.append(cube_loss_value)
+
+                        if loss_terms:
+                            total_loss = torch.stack(loss_terms).sum()
+                            grads = torch.autograd.grad(
+                                total_loss,
+                                x0_detached,
+                                retain_graph=False,
+                                allow_unused=False
+                            )[0]
+
+                            if grads is not None:
+                                step_scale = 0.1 / max(total_steps, 1)
+                                x.add_(-step_scale * grads)
+                                x0.add_(-step_scale * grads)
+
+                except RuntimeError as err:
+                    print(f"?? Geometric loss callback failed at step {step}: {err}")
         else:
             loss_callback = None
 
@@ -410,7 +449,7 @@ class Equirect360Viewer:
             W, H = img_pil.size
             if W > max_resolution:
                 new_W = max_resolution
-                new_H = max_W // 2  # Maintain 2:1 ratio
+                new_H = new_W // 2  # Maintain 2:1 ratio
                 img_pil = img_pil.resize((new_W, new_H), Image.LANCZOS)
                 print(f"📐 Resized for preview: {W}×{H} → {new_W}×{new_H}")
 

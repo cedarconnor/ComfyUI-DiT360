@@ -13,11 +13,11 @@ from .losses import (
     CubeLoss,
     rotate_equirect_yaw,
     compute_yaw_consistency,
+    equirect_to_cubemap,
+    cubemap_to_equirect,
 )
 
 from .projection import (
-    equirect_to_cubemap,
-    cubemap_to_equirect,
     create_equirect_to_cube_grid,
     equirect_to_cubemap_fast,
     cubemap_to_equirect_fast,
