@@ -18,6 +18,7 @@ from safetensors.torch import load_file
 from typing import Union, Optional, Tuple
 import comfy.model_management as mm
 from huggingface_hub import snapshot_download
+import math
 
 
 class DiT360VAE:
@@ -41,7 +42,10 @@ class DiT360VAE:
         dtype: torch.dtype,
         device: torch.device,
         offload_device: torch.device,
-        scale_factor: int = 8
+        scale_factor: int = 8,
+        tile_size: int = 1536,
+        tile_overlap: int = 128,
+        max_tile_pixels: int = 4096 * 4096
     ):
         self.vae = vae_model
         self.dtype = dtype
@@ -49,6 +53,9 @@ class DiT360VAE:
         self.offload_device = offload_device
         self.scale_factor = scale_factor
         self.is_loaded = False
+        self.tile_size = max(tile_size, scale_factor)
+        self.tile_overlap = max(0, min(tile_overlap, self.tile_size - 1))
+        self.max_tile_pixels = max_tile_pixels
 
     def load_to_device(self):
         """Load VAE to GPU"""
@@ -64,6 +71,203 @@ class DiT360VAE:
             self.vae.to(self.offload_device)
             self.is_loaded = False
             mm.soft_empty_cache()
+
+    def _should_tile(self, height: int, width: int, force: bool) -> bool:
+        if force:
+            return True
+        if self.tile_size <= 0:
+            return False
+        if self.max_tile_pixels and self.max_tile_pixels > 0 and (height * width) > self.max_tile_pixels:
+            return True
+        if max(height, width) > self.tile_size:
+            return True
+        return False
+
+    @staticmethod
+    def _compute_tile_starts(length: int, tile: int, overlap: int) -> list:
+        if tile >= length:
+            return [0]
+        stride = max(tile - overlap, 1)
+        starts = list(range(0, max(length - tile, 0) + 1, stride))
+        last = length - tile
+        if starts[-1] != last:
+            starts.append(last)
+        return sorted(set(starts))
+
+    @staticmethod
+    def _blend_weights(
+        tile_tensor: torch.Tensor,
+        top: int,
+        bottom: int,
+        total: int,
+        overlap_elements: int
+    ) -> torch.Tensor:
+        """Create blending weights for overlapping stripes."""
+        weight = torch.ones_like(tile_tensor[:, :1, :, :])
+        if overlap_elements <= 0:
+            return weight
+
+        if top > 0:
+            ramp = torch.linspace(
+                0.0,
+                1.0,
+                steps=min(overlap_elements, tile_tensor.shape[2]),
+                device=tile_tensor.device,
+                dtype=tile_tensor.dtype
+            )
+            weight[:, :, :ramp.numel(), :] *= ramp.view(1, 1, -1, 1)
+
+        if bottom < total:
+            ramp = torch.linspace(
+                1.0,
+                0.0,
+                steps=min(overlap_elements, tile_tensor.shape[2]),
+                device=tile_tensor.device,
+                dtype=tile_tensor.dtype
+            )
+            weight[:, :, -ramp.numel():, :] *= ramp.view(1, 1, -1, 1)
+
+        return weight
+
+    def _encode_direct(self, x: torch.Tensor) -> torch.Tensor:
+        """Direct VAE encode without tiling. Expects tensor on device and normalized."""
+        with torch.no_grad():
+            if hasattr(self.vae, 'encode'):
+                try:
+                    encoded = self.vae.encode(x)
+                    if hasattr(encoded, 'latent_dist'):
+                        latent = encoded.latent_dist.sample()
+                    elif hasattr(encoded, 'latents'):
+                        latent = encoded.latents
+                    else:
+                        latent = encoded
+                except Exception as e:
+                    print(f"Warning: VAE encode failed ({e}), using fallback")
+                    latent = torch.nn.functional.avg_pool2d(x, kernel_size=self.scale_factor)
+                    if latent.shape[1] != 4:
+                        latent = latent[:, :4, :, :] if latent.shape[1] > 4 else \
+                                torch.cat([latent, torch.zeros_like(latent[:, :1, :, :])], dim=1)
+            else:
+                latent = torch.nn.functional.avg_pool2d(x, kernel_size=self.scale_factor)
+                if latent.shape[1] != 4:
+                    latent = latent[:, :4, :, :] if latent.shape[1] > 4 else \
+                            torch.cat([latent, torch.zeros_like(latent[:, :1, :, :])], dim=1)
+        return latent
+
+    def _decode_direct(self, latent: torch.Tensor) -> torch.Tensor:
+        """Direct VAE decode without tiling."""
+        with torch.no_grad():
+            if hasattr(self.vae, 'decode'):
+                try:
+                    decoded = self.vae.decode(latent)
+                    if hasattr(decoded, 'sample'):
+                        image = decoded.sample
+                    else:
+                        image = decoded
+
+                    image = (image + 1.0) / 2.0
+                    image = torch.clamp(image, 0.0, 1.0)
+
+                except Exception as e:
+                    print(f"Warning: VAE decode failed ({e}), using fallback")
+                    image = torch.nn.functional.interpolate(
+                        latent,
+                        scale_factor=self.scale_factor,
+                        mode='bilinear',
+                        align_corners=False
+                    )
+                    if image.shape[1] != 3:
+                        image = image[:, :3, :, :] if image.shape[1] > 3 else \
+                               torch.cat([image] * (3 // image.shape[1] + 1), dim=1)[:, :3, :, :]
+                    image = torch.clamp(image, 0.0, 1.0)
+            else:
+                image = torch.nn.functional.interpolate(
+                    latent,
+                    scale_factor=self.scale_factor,
+                    mode='bilinear',
+                    align_corners=False
+                )
+                if image.shape[1] != 3:
+                    image = image[:, :3, :, :] if image.shape[1] > 3 else \
+                           torch.cat([image] * (3 // image.shape[1] + 1), dim=1)[:, :3, :, :]
+                image = torch.clamp(image, 0.0, 1.0)
+
+        return image
+
+    def _encode_tiled_height(self, x: torch.Tensor, height: int) -> torch.Tensor:
+        """Encode using height-wise tiling with blending to control VRAM."""
+        tile_h = min(self.tile_size, height)
+        starts = self._compute_tile_starts(height, tile_h, self.tile_overlap)
+
+        latent_accum = None
+        weight_accum = None
+        for top in starts:
+            bottom = min(top + tile_h, height)
+            tile = x[:, :, top:bottom, :]
+            latent_tile = self._encode_direct(tile)
+
+            if latent_accum is None:
+                batch, channels, latent_tile_h, latent_w = latent_tile.shape
+                total_latent_h = math.ceil(height / self.scale_factor)
+                latent_accum = torch.zeros(batch, channels, total_latent_h, latent_w, device=latent_tile.device, dtype=latent_tile.dtype)
+                weight_accum = torch.zeros_like(latent_accum)
+
+            latent_top = top // self.scale_factor
+            latent_bottom = min(latent_top + latent_tile.shape[2], latent_accum.shape[2])
+            valid = latent_tile[:, :, :latent_bottom - latent_top, :]
+            overlap_latent = max(self.tile_overlap // self.scale_factor, 0)
+            weights = self._blend_weights(valid, latent_top, latent_bottom, latent_accum.shape[2], overlap_latent)
+
+            latent_accum[:, :, latent_top:latent_bottom, :] += valid * weights
+            weight_accum[:, :, latent_top:latent_bottom, :] += weights
+
+        latent = latent_accum / weight_accum.clamp_min(1e-6)
+        return latent
+
+    def _decode_tiled_height(self, latent: torch.Tensor) -> torch.Tensor:
+        """Decode latent using height-wise tiling with blending."""
+        tile_latent_h = max(self.tile_size // self.scale_factor, 1)
+        tile_latent_h = min(tile_latent_h, latent.shape[2])
+        overlap_latent = max(self.tile_overlap // self.scale_factor, 0)
+        starts = self._compute_tile_starts(latent.shape[2], tile_latent_h, overlap_latent)
+
+        image_accum = None
+        weight_accum = None
+        for top in starts:
+            bottom = min(top + tile_latent_h, latent.shape[2])
+            tile = latent[:, :, top:bottom, :]
+            decoded_tile = self._decode_direct(tile)
+
+            if image_accum is None:
+                batch, channels, tile_h, tile_w = decoded_tile.shape
+                total_height = latent.shape[2] * self.scale_factor
+                image_accum = torch.zeros(batch, channels, total_height, tile_w, device=decoded_tile.device, dtype=decoded_tile.dtype)
+                weight_accum = torch.zeros_like(image_accum)
+
+            image_top = top * self.scale_factor
+            image_bottom = min(image_top + decoded_tile.shape[2], image_accum.shape[2])
+            valid = decoded_tile[:, :, :image_bottom - image_top, :]
+            weights = self._blend_weights(valid, image_top, image_bottom, image_accum.shape[2], self.tile_overlap)
+
+            image_accum[:, :, image_top:image_bottom, :] += valid * weights
+            weight_accum[:, :, image_top:image_bottom, :] += weights
+
+        image = image_accum / weight_accum.clamp_min(1e-6)
+        return image
+
+    def configure_tiling(
+        self,
+        tile_size: Optional[int] = None,
+        tile_overlap: Optional[int] = None,
+        max_tile_pixels: Optional[int] = None
+    ):
+        """Update tiling parameters at runtime."""
+        if tile_size is not None and tile_size > 0:
+            self.tile_size = max(tile_size, self.scale_factor)
+        if tile_overlap is not None and tile_overlap >= 0:
+            self.tile_overlap = tile_overlap
+        if max_tile_pixels is not None and max_tile_pixels >= 0:
+            self.max_tile_pixels = max_tile_pixels
 
     def encode(
         self,
@@ -94,33 +298,12 @@ class DiT360VAE:
         # Normalize from [0, 1] to [-1, 1] for VAE
         x = (x * 2.0) - 1.0
 
-        with torch.no_grad():
-            if hasattr(self.vae, 'encode'):
-                # Use VAE's encode method if available
-                try:
-                    # Try diffusers-style VAE
-                    encoded = self.vae.encode(x)
-                    if hasattr(encoded, 'latent_dist'):
-                        # AutoencoderKL from diffusers
-                        latent = encoded.latent_dist.sample()
-                    elif hasattr(encoded, 'latents'):
-                        latent = encoded.latents
-                    else:
-                        latent = encoded
-                except Exception as e:
-                    print(f"Warning: VAE encode failed ({e}), using fallback")
-                    # Fallback: downsample
-                    latent = torch.nn.functional.avg_pool2d(x, kernel_size=self.scale_factor)
-                    # Ensure 4 channels
-                    if latent.shape[1] != 4:
-                        latent = latent[:, :4, :, :] if latent.shape[1] > 4 else \
-                                torch.cat([latent, torch.zeros_like(latent[:, :1, :, :])], dim=1)
-            else:
-                # Fallback if no encode method
-                latent = torch.nn.functional.avg_pool2d(x, kernel_size=self.scale_factor)
-                if latent.shape[1] != 4:
-                    latent = latent[:, :4, :, :] if latent.shape[1] > 4 else \
-                            torch.cat([latent, torch.zeros_like(latent[:, :1, :, :])], dim=1)
+        height, width = x.shape[2], x.shape[3]
+
+        if self._should_tile(height, width, use_tiling):
+            latent = self._encode_tiled_height(x, height)
+        else:
+            latent = self._encode_direct(x)
 
         return latent
 
@@ -149,48 +332,10 @@ class DiT360VAE:
 
         latent = latent.to(self.device, dtype=self.dtype)
 
-        with torch.no_grad():
-            if hasattr(self.vae, 'decode'):
-                # Use VAE's decode method if available
-                try:
-                    # Try diffusers-style VAE decode
-                    decoded = self.vae.decode(latent)
-                    if hasattr(decoded, 'sample'):
-                        # DecoderOutput from diffusers
-                        image = decoded.sample
-                    else:
-                        image = decoded
-
-                    # Denormalize from [-1, 1] to [0, 1]
-                    image = (image + 1.0) / 2.0
-                    image = torch.clamp(image, 0.0, 1.0)
-
-                except Exception as e:
-                    print(f"Warning: VAE decode failed ({e}), using fallback")
-                    # Fallback: upsample
-                    image = torch.nn.functional.interpolate(
-                        latent,
-                        scale_factor=self.scale_factor,
-                        mode='bilinear',
-                        align_corners=False
-                    )
-                    # Ensure 3 channels
-                    if image.shape[1] != 3:
-                        image = image[:, :3, :, :] if image.shape[1] > 3 else \
-                               torch.cat([image] * (3 // image.shape[1] + 1), dim=1)[:, :3, :, :]
-                    image = torch.clamp(image, 0.0, 1.0)
-            else:
-                # Fallback if no decode method
-                image = torch.nn.functional.interpolate(
-                    latent,
-                    scale_factor=self.scale_factor,
-                    mode='bilinear',
-                    align_corners=False
-                )
-                if image.shape[1] != 3:
-                    image = image[:, :3, :, :] if image.shape[1] > 3 else \
-                           torch.cat([image] * (3 // image.shape[1] + 1), dim=1)[:, :3, :, :]
-                image = torch.clamp(image, 0.0, 1.0)
+        if self._should_tile(latent.shape[2] * self.scale_factor, latent.shape[3] * self.scale_factor, use_tiling):
+            image = self._decode_tiled_height(latent)
+        else:
+            image = self._decode_direct(latent)
 
         # Convert to ComfyUI format (B, H, W, C)
         image = image.permute(0, 2, 3, 1).cpu().float()
@@ -277,7 +422,10 @@ def load_vae(
     vae_path: Union[str, Path],
     precision: str = "fp16",
     device: Optional[torch.device] = None,
-    offload_device: Optional[torch.device] = None
+    offload_device: Optional[torch.device] = None,
+    tile_size: int = 1536,
+    tile_overlap: int = 128,
+    max_tile_pixels: int = 4096 * 4096
 ) -> DiT360VAE:
     """
     Load VAE model for DiT360
@@ -287,6 +435,9 @@ def load_vae(
         precision: Model precision (fp32/fp16/bf16)
         device: Target device (None = auto)
         offload_device: Offload device (None = CPU)
+        tile_size: Maximum height (pixels) per VAE tile
+        tile_overlap: Overlap between tiles to reduce seams (pixels)
+        max_tile_pixels: Threshold for auto-tiling (total pixels)
 
     Returns:
         DiT360VAE wrapper
@@ -309,6 +460,7 @@ def load_vae(
     print(f"Path: {vae_path}")
     print(f"Precision: {precision}")
     print(f"Device: {device}")
+    print(f"Tile size: {tile_size}px, overlap: {tile_overlap}px, auto-tiling threshold: {max_tile_pixels} pixels")
     print(f"{'='*60}\n")
 
     # Check file exists
@@ -420,7 +572,10 @@ def load_vae(
         dtype=dtype,
         device=device,
         offload_device=offload_device,
-        scale_factor=8  # FLUX VAE uses 8x downscale
+        scale_factor=8,  # FLUX VAE uses 8x downscale
+        tile_size=tile_size,
+        tile_overlap=tile_overlap,
+        max_tile_pixels=max_tile_pixels
     )
 
     print(f"✓ VAE ready\n")

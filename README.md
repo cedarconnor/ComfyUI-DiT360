@@ -12,6 +12,7 @@ Generate high-fidelity 360-degree panoramic images using the DiT360 diffusion tr
 - **Seamless Wraparound**: Automatic edge blending for perfect 360° continuity
 - **Advanced Quality Options**: Yaw loss and cube loss for enhanced consistency
 - **Multiple Precisions**: Support for fp16, bf16, fp32, and fp8
+- **Optimization Controls**: Switchable attention backends, attention slicing, optional int8/int4 quantization, and VAE tiling
 - **Windows Compatible**: Proper path handling for Windows systems
 - **Minimal Node Count**: Only 6 nodes for simple workflows
 
@@ -251,6 +252,9 @@ tapestries, high vaulted ceiling, dramatic lighting"
    - Use fp16 or fp8 precision
    - Enable `offload_to_cpu`
    - Use smaller resolution (1024×512)
+    - Set `attention_slice_size` to 256–512
+    - Load with `quantization_mode=int8` (or `int4` if bitsandbytes is available)
+    - Decode with `tiling_mode=always`
 
 2. **Higher quality**:
    - Use bf16 or fp32 precision
@@ -261,7 +265,13 @@ tapestries, high vaulted ceiling, dramatic lighting"
 3. **Faster generation**:
    - Reduce steps to 20-30
    - Disable yaw_loss and cube_loss
-   - Use fp16 precision
+    - Use fp16 precision
+    - Switch to `scheduler_type=ddim` with `scheduler_eta=0.0`
+    - Choose `attention_backend=flash` or `xformers` when available
+
+4. **Memory diagnostics**:
+   - Toggle `log_memory_stats` in the sampler to print allocated/peak VRAM
+   - Record results in `docs/benchmarks/phase4_baseline.md` for regression tracking
 
 ## 🔧 Troubleshooting
 
@@ -337,10 +347,10 @@ The DiT360 model is subject to FLUX.1-dev license terms.
 ## 🗺️ Roadmap
 
 - [x] Phase 1: Basic structure and nodes
-- [ ] Phase 2: Model loading and HuggingFace integration
-- [ ] Phase 3: Text encoding with T5-XXL
-- [ ] Phase 4: Core generation with circular padding
-- [ ] Phase 5: VAE decoding and edge blending
+- [x] Phase 2: Model loading and HuggingFace integration
+- [x] Phase 3: Text encoding with T5-XXL
+- [x] Phase 4: Core generation with circular padding
+- [ ] Phase 5: Optimization & memory efficiency (attention backends, tiling)
 - [ ] Phase 6: Interactive 360° viewer (Three.js)
 - [ ] Phase 7: Advanced features (yaw loss, cube loss)
 - [ ] Phase 8: Inpainting and outpainting support

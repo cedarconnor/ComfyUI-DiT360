@@ -33,8 +33,10 @@ from .conditioning import (
 from .scheduler import (
     FlowMatchScheduler,
     CFGFlowMatchScheduler,
+    DDIMSchedulerLite,
     get_timestep_schedule,
     compute_snr,
+    create_scheduler,
 )
 
 from .losses import (
@@ -96,8 +98,10 @@ __all__ = [
     # Scheduler
     'FlowMatchScheduler',
     'CFGFlowMatchScheduler',
+    'DDIMSchedulerLite',
     'get_timestep_schedule',
     'compute_snr',
+    'create_scheduler',
     # Losses
     'YawLoss',
     'CubeLoss',

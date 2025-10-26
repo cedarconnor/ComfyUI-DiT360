@@ -218,35 +218,44 @@ nodes.py (updated)                 ✓ 2 new nodes (1056 lines total)
 - Integration tests passing
 - 7,500+ total lines of code
 
+### Phase 5: Optimization & Memory Efficiency (IN PROGRESS)
+
+**Completed so far**
+- Attention backend selector (eager, xFormers, FlashAttention) with runtime slicing controls
+- Optional int8/int4 quantization during model load (safe fallback to fp precision)
+- VAE tiling pipeline with configurable tile size, overlap, and auto pixel threshold
+- DDIM scheduler option plus timestep schedule selection in sampler
+- Sampler memory telemetry via `log_memory_stats`
+- Baseline benchmark template at `docs/benchmarks/phase4_baseline.md`
+
+**Outstanding**
+- Validate FlashAttention/xFormers support on Windows GPUs
+- Extend scheduler catalogue (e.g., DPM++ variants) and benchmark presets
+- Propagate optimization presets into example workflows & docs
+
 ## 🚧 In Progress
 
-None currently - Phase 4 complete!
+### Phase 5 Focus Areas
+- Package FlashAttention binaries (or document manual install) for Windows users
+- Create automated benchmark harness comparing schedulers/backends
+- Add example workflows demonstrating low-VRAM and high-speed presets
 
-## 📋 Next Steps (Phase 2: Model Loading)
+## 📋 Next Steps (Phase 5: Optimization)
 
-### Priority 1: Model Loading Infrastructure
+### Priority 1: Backend Validation & Packaging
+- Confirm xFormers/FlashAttention code paths on target GPUs (Windows focus)
+- Document dependency installation caveats in README
+- Automate fallback detection with clearer console messaging
 
-**File**: `dit360/model.py`
+### Priority 2: Scheduler & Benchmark Enhancements
+- Add DPM++ 2M / Euler ancestral variants to `dit360/scheduler.py`
+- Create benchmark harness comparing flow_match vs DDIM vs DPM++
+- Record results in `docs/benchmarks/` for regression tracking
 
-Create DiT360 model loading system:
-
-1. **DiT360Model Class**
-   - FLUX.1-dev based transformer architecture
-   - Circular padding integration in attention layers
-   - RoPE positional embeddings for spherical geometry
-   - Support for 12B parameter model
-
-2. **load_dit360_model() Function**
-   - Load from safetensors
-   - Precision conversion (fp32/fp16/bf16/fp8)
-   - Device management (GPU/CPU offloading)
-   - Model caching
-
-3. **download_dit360_model() Function**
-   - HuggingFace Hub integration
-   - Automatic model download
-   - Progress reporting
-   - Error handling
+### Priority 3: Workflow & Documentation Updates
+- Publish optimization-oriented example workflows (low VRAM, fast preview)
+- Surface new controls in README usage guides with screenshots
+- Update troubleshooting section with tiling/quantization edge cases
 
 **Reference**: Study `ComfyUI-OpenDiTWrapper/nodes.py:53-90` for HF download pattern
 
@@ -311,7 +320,7 @@ class DiT360Loader:
 | **Phase 2** | Model Loading | ✅ Complete | 100% |
 | **Phase 3** | Model Inference | ✅ Complete | 100% |
 | **Phase 4** | Advanced Features | ✅ Complete | 100% |
-| **Phase 5** | Optimization | 🔲 Not Started | 0% |
+| **Phase 5** | Optimization | 🟡 In Progress | 40% |
 | **Phase 6** | 360° Viewer | 🔲 Not Started | 0% |
 | **Phase 7** | Training & Polish | 🔲 Not Started | 0% |
 | **Phase 8** | Windows Testing | 🔲 Not Started | 0% |

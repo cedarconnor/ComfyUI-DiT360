@@ -23,6 +23,44 @@ import comfy.model_management as mm
 from huggingface_hub import snapshot_download
 import os
 import math
+import importlib
+import warnings
+
+
+def _import_optional(module_name: str):
+    """
+    Attempt to import an optional dependency.
+
+    Returns the imported module or None if unavailable.
+    """
+    try:
+        return importlib.import_module(module_name)
+    except Exception:
+        return None
+
+
+_XFORMERS_OPS = _import_optional("xformers.ops")
+_FLASH_ATTN_UNPADDED = None
+_FLASH_ATTN_AVAILABLE = False
+_BITSANDBYTES_NN = _import_optional("bitsandbytes.nn")
+_HAS_BITSANDBYTES = False
+_BNB_LINEAR4 = None
+if _BITSANDBYTES_NN is not None and hasattr(_BITSANDBYTES_NN, "Linear4bit"):
+    _HAS_BITSANDBYTES = True
+    _BNB_LINEAR4 = _BITSANDBYTES_NN.Linear4bit
+_SLICE_SENTINEL = object()
+
+if _import_optional("flash_attn") is not None:
+    # Try to grab the unpadded attention function (preferred API)
+    flash_interface = _import_optional("flash_attn.flash_attn_interface")
+    if flash_interface is not None and hasattr(flash_interface, "flash_attn_unpadded_qkvpacked_func"):
+        _FLASH_ATTN_UNPADDED = flash_interface.flash_attn_unpadded_qkvpacked_func
+        _FLASH_ATTN_AVAILABLE = True
+    else:
+        flash_pkg = _import_optional("flash_attn.flash_attn_func")
+        if flash_pkg is not None and hasattr(flash_pkg, "flash_attn_func"):
+            _FLASH_ATTN_UNPADDED = flash_pkg.flash_attn_func
+            _FLASH_ATTN_AVAILABLE = True
 
 
 # ============================================================================
@@ -155,7 +193,9 @@ class MultiHeadAttention(nn.Module):
         hidden_size: int,
         num_heads: int,
         enable_circular_padding: bool = True,
-        circular_padding_width: int = 0
+        circular_padding_width: int = 0,
+        attention_backend: str = "auto",
+        attention_slice_size: Optional[int] = None
     ):
         super().__init__()
         self.hidden_size = hidden_size
@@ -163,6 +203,10 @@ class MultiHeadAttention(nn.Module):
         self.head_dim = hidden_size // num_heads
         self.enable_circular_padding = enable_circular_padding
         self.circular_padding_width = circular_padding_width
+        self.requested_backend = attention_backend
+        self.attention_backend = self._resolve_backend(attention_backend)
+        self.attention_slice_size = attention_slice_size
+        self._backend_warning_logged = False
 
         assert hidden_size % num_heads == 0, "hidden_size must be divisible by num_heads"
 
@@ -171,6 +215,47 @@ class MultiHeadAttention(nn.Module):
 
         # Output projection
         self.out_proj = nn.Linear(hidden_size, hidden_size, bias=False)
+
+    def _resolve_backend(self, backend: str) -> str:
+        """Resolve requested attention backend to an available implementation."""
+        backend = (backend or "auto").lower()
+
+        if backend == "auto":
+            if _XFORMERS_OPS is not None:
+                return "xformers"
+            if _FLASH_ATTN_AVAILABLE:
+                return "flash"
+            return "eager"
+
+        if backend == "xformers":
+            if _XFORMERS_OPS is None:
+                return "eager"
+            return "xformers"
+
+        if backend in {"flash", "flash_attn", "flashattention"}:
+            if _FLASH_ATTN_AVAILABLE:
+                return "flash"
+            return "eager"
+
+        return "eager"
+
+    def set_attention_backend(self, backend: str):
+        """Update attention backend at runtime."""
+        resolved = self._resolve_backend(backend)
+        if resolved != backend and backend not in {"auto", resolved} and not self._backend_warning_logged:
+            warnings.warn(
+                f"Requested attention backend '{backend}' is unavailable; falling back to '{resolved}'.",
+                RuntimeWarning
+            )
+            self._backend_warning_logged = True
+        self.requested_backend = backend
+        self.attention_backend = resolved
+
+    def set_attention_slicing(self, slice_size: Optional[int]):
+        """Configure attention slicing chunk size."""
+        if slice_size is not None and slice_size <= 0:
+            slice_size = None
+        self.attention_slice_size = slice_size
 
     def apply_circular_padding_to_tokens(
         self,
@@ -277,13 +362,25 @@ class MultiHeadAttention(nn.Module):
                 q = apply_rotary_emb(q.transpose(1, 2), freqs_cos[:actual_seq_len], freqs_sin[:actual_seq_len]).transpose(1, 2)
                 k = apply_rotary_emb(k.transpose(1, 2), freqs_cos[:actual_seq_len], freqs_sin[:actual_seq_len]).transpose(1, 2)
 
-        # Scaled dot-product attention
         scale = 1.0 / math.sqrt(self.head_dim)
-        attn = (q @ k.transpose(-2, -1)) * scale
-        attn = F.softmax(attn, dim=-1)
+        backend = self.attention_backend
 
-        # Apply attention to values
-        out = attn @ v  # (B, num_heads, seq_len, head_dim)
+        try:
+            if backend == "xformers":
+                out = self._forward_xformers(q, k, v)
+            elif backend == "flash":
+                out = self._forward_flash(q, k, v, scale)
+            else:
+                out = self._forward_eager(q, k, v, scale)
+        except RuntimeError as err:
+            if not self._backend_warning_logged:
+                warnings.warn(
+                    f"Attention backend '{backend}' failed with error '{err}'. Falling back to eager implementation.",
+                    RuntimeWarning
+                )
+                self._backend_warning_logged = True
+            self.attention_backend = "eager"
+            out = self._forward_eager(q, k, v, scale)
 
         # Reshape and project
         out = out.transpose(1, 2).reshape(B, -1, self.hidden_size)
@@ -294,6 +391,72 @@ class MultiHeadAttention(nn.Module):
             out = self.remove_circular_padding_from_tokens(out, height, width)
 
         return out
+
+    def _forward_eager(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        scale: float
+    ) -> torch.Tensor:
+        """Standard PyTorch attention with optional slicing."""
+        if self.attention_slice_size is not None and self.attention_slice_size < q.shape[2]:
+            outputs = []
+            for start in range(0, q.shape[2], self.attention_slice_size):
+                end = min(start + self.attention_slice_size, q.shape[2])
+                q_slice = q[:, :, start:end, :]
+                attn_slice = torch.matmul(q_slice, k.transpose(-2, -1)) * scale
+                attn_slice = attn_slice.softmax(dim=-1)
+                out_slice = torch.matmul(attn_slice, v)
+                outputs.append(out_slice)
+            out = torch.cat(outputs, dim=2)
+        else:
+            attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+            attn = attn.softmax(dim=-1)
+            out = torch.matmul(attn, v)
+        return out
+
+    def _forward_xformers(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor
+    ) -> torch.Tensor:
+        """xFormers memory efficient attention."""
+        if _XFORMERS_OPS is None:
+            return self._forward_eager(q, k, v, 1.0 / math.sqrt(self.head_dim))
+
+        B, heads, seq_len, head_dim = q.shape
+        q_flat = q.reshape(B * heads, seq_len, head_dim)
+        k_flat = k.reshape(B * heads, seq_len, head_dim)
+        v_flat = v.reshape(B * heads, seq_len, head_dim)
+
+        out = _XFORMERS_OPS.memory_efficient_attention(q_flat, k_flat, v_flat, attn_bias=None)
+        out = out.reshape(B, heads, seq_len, head_dim)
+        return out
+
+    def _forward_flash(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        scale: float
+    ) -> torch.Tensor:
+        """FlashAttention integration (unpadded)."""
+        if not _FLASH_ATTN_AVAILABLE or _FLASH_ATTN_UNPADDED is None:
+            return self._forward_eager(q, k, v, scale)
+
+        B, heads, seq_len, head_dim = q.shape
+        qkv = torch.stack([q, k, v], dim=2)  # (B, heads, 3, seq, head_dim)
+        qkv = qkv.permute(0, 1, 3, 2, 4).contiguous()  # (B, heads, seq, 3, head_dim)
+        qkv = qkv.view(B * heads, seq_len, 3, head_dim)
+
+        try:
+            out = _FLASH_ATTN_UNPADDED(qkv, causal=False)
+            out = out.view(B, heads, seq_len, head_dim)
+            return out
+        except RuntimeError:
+            return self._forward_eager(q, k, v, scale)
 
 
 # ============================================================================
@@ -337,7 +500,9 @@ class TransformerBlock(nn.Module):
         conditioning_dim: int,
         mlp_ratio: float = 4.0,
         enable_circular_padding: bool = True,
-        circular_padding_width: int = 0
+        circular_padding_width: int = 0,
+        attention_backend: str = "auto",
+        attention_slice_size: Optional[int] = None
     ):
         super().__init__()
 
@@ -350,7 +515,9 @@ class TransformerBlock(nn.Module):
             hidden_size,
             num_heads,
             enable_circular_padding,
-            circular_padding_width
+            circular_padding_width,
+            attention_backend=attention_backend,
+            attention_slice_size=attention_slice_size
         )
 
         # MLP
@@ -390,6 +557,14 @@ class TransformerBlock(nn.Module):
 
         return x
 
+    def set_attention_backend(self, backend: str):
+        """Update backend for the internal attention layer."""
+        self.attn.set_attention_backend(backend)
+
+    def set_attention_slicing(self, slice_size: Optional[int]):
+        """Update slicing configuration for the internal attention layer."""
+        self.attn.set_attention_slicing(slice_size)
+
 
 # ============================================================================
 # DiT360 Model
@@ -409,10 +584,18 @@ class DiT360Model(nn.Module):
         enable_circular_padding: Enable circular padding in attention layers
     """
 
-    def __init__(self, config: Dict, enable_circular_padding: bool = True):
+    def __init__(
+        self,
+        config: Dict,
+        enable_circular_padding: bool = True,
+        attention_backend: str = "auto",
+        attention_slice_size: Optional[int] = None
+    ):
         super().__init__()
         self.config = config
         self.enable_circular_padding = enable_circular_padding
+        self.attention_backend = attention_backend
+        self.attention_slice_size = attention_slice_size
 
         # Extract key parameters from config
         self.in_channels = config.get("in_channels", 4)
@@ -429,6 +612,9 @@ class DiT360Model(nn.Module):
         print(f"  Layers: {self.num_layers}")
         print(f"  Attention heads: {self.num_heads}")
         print(f"  Circular padding: {enable_circular_padding}")
+        print(f"  Attention backend: {attention_backend}")
+        if attention_slice_size:
+            print(f"  Attention slicing: {attention_slice_size}")
 
         # ====================================================================
         # Input Processing
@@ -483,10 +669,35 @@ class DiT360Model(nn.Module):
                 conditioning_dim=self.conditioning_dim,
                 mlp_ratio=self.mlp_ratio,
                 enable_circular_padding=enable_circular_padding,
-                circular_padding_width=self.circular_padding_width
+                circular_padding_width=self.circular_padding_width,
+                attention_backend=attention_backend,
+                attention_slice_size=attention_slice_size
             )
             for _ in range(self.num_layers)
         ])
+
+    def set_attention_backend(self, backend: str):
+        """Update attention backend for all transformer blocks."""
+        self.attention_backend = backend
+        for block in self.blocks:
+            block.set_attention_backend(backend)
+
+    def set_attention_slicing(self, slice_size: Optional[int]):
+        """Update attention slicing setting for all transformer blocks."""
+        self.attention_slice_size = slice_size
+        for block in self.blocks:
+            block.set_attention_slicing(slice_size)
+
+    def set_attention_options(
+        self,
+        backend: Optional[str] = None,
+        slice_size: Union[int, None, object] = _SLICE_SENTINEL
+    ):
+        """Convenience method to configure backend and slicing in one call."""
+        if backend is not None:
+            self.set_attention_backend(backend)
+        if slice_size is not _SLICE_SENTINEL:
+            self.set_attention_slicing(slice_size if slice_size is not None else None)
 
         # ====================================================================
         # Output Processing
@@ -654,13 +865,17 @@ class DiT360Wrapper:
         model: DiT360Model,
         dtype: torch.dtype,
         device: torch.device,
-        offload_device: torch.device
+        offload_device: torch.device,
+        quantization_mode: str = "none"
     ):
         self.model = model
         self.dtype = dtype
         self.device = device
         self.offload_device = offload_device
         self.is_loaded = False
+        self.attention_backend = model.attention_backend
+        self.attention_slice_size = model.attention_slice_size
+        self.quantization_mode = quantization_mode
 
     def load_to_device(self):
         """Load model to GPU"""
@@ -676,6 +891,18 @@ class DiT360Wrapper:
             self.model.to(self.offload_device)
             self.is_loaded = False
             mm.soft_empty_cache()
+
+    def set_attention_options(
+        self,
+        backend: Optional[str] = None,
+        slice_size: Union[int, None, object] = _SLICE_SENTINEL
+    ):
+        """Expose attention configuration for downstream nodes."""
+        self.model.set_attention_options(backend=backend, slice_size=slice_size)
+        if backend is not None:
+            self.attention_backend = self.model.attention_backend
+        if slice_size is not _SLICE_SENTINEL:
+            self.attention_slice_size = self.model.attention_slice_size
 
 
 def download_dit360_from_huggingface(
@@ -745,7 +972,10 @@ def load_dit360_model(
     precision: str = "fp16",
     device: Optional[torch.device] = None,
     offload_device: Optional[torch.device] = None,
-    enable_circular_padding: bool = True
+    enable_circular_padding: bool = True,
+    attention_backend: str = "auto",
+    attention_slice_size: Optional[int] = None,
+    quantization_mode: str = "none"
 ) -> DiT360Wrapper:
     """
     Load DiT360 model from file or HuggingFace
@@ -756,6 +986,9 @@ def load_dit360_model(
         device: Target device (None = auto-detect GPU)
         offload_device: Device for offloading (None = CPU)
         enable_circular_padding: Enable circular padding for panoramas
+        attention_backend: Attention implementation (auto/eager/xformers/flash)
+        attention_slice_size: Optional chunk size for attention slicing
+        quantization_mode: Optional post-load quantization ("none", "int8", "int4")
 
     Returns:
         DiT360Wrapper containing loaded model
@@ -784,6 +1017,10 @@ def load_dit360_model(
     print(f"Precision: {precision}")
     print(f"Device: {device}")
     print(f"Offload: {offload_device}")
+    print(f"Attention backend: {attention_backend}")
+    if attention_slice_size:
+        print(f"Attention slicing: {attention_slice_size}")
+    print(f"Quantization: {quantization_mode}")
     print(f"{'='*60}\n")
 
     # Handle directory vs file path
@@ -838,7 +1075,12 @@ def load_dit360_model(
 
     # Initialize model
     print("Initializing DiT360 architecture...")
-    model = DiT360Model(config, enable_circular_padding=enable_circular_padding)
+    model = DiT360Model(
+        config,
+        enable_circular_padding=enable_circular_padding,
+        attention_backend=attention_backend,
+        attention_slice_size=attention_slice_size
+    )
 
     # Load weights
     print(f"Loading weights from: {model_path.name}")
@@ -865,7 +1107,73 @@ def load_dit360_model(
     except Exception as e:
         raise RuntimeError(f"Failed to load model weights: {e}")
 
-    # Convert precision
+    # Quantization (optional)
+    quantization_mode = (quantization_mode or "none").lower()
+    supported_quant = {"none", "int8", "int4"}
+    if quantization_mode not in supported_quant:
+        raise ValueError(f"Unknown quantization mode: {quantization_mode}. Use: {sorted(supported_quant)}")
+
+    quantized = False
+    quantization_note = None
+
+    if quantization_mode == "int8":
+        try:
+            from torch.ao.quantization import quantize_dynamic
+
+            print("Applying dynamic int8 quantization (torch.ao.quantization)...")
+            model = model.to(dtype=torch.float32)
+            model = quantize_dynamic(model, {nn.Linear}, dtype=torch.qint8)
+            quantized = True
+            quantization_note = "int8 dynamic"
+        except Exception as quant_err:
+            warnings.warn(
+                f"Failed to apply int8 quantization ({quant_err}). Continuing without quantization.",
+                RuntimeWarning
+            )
+            quantization_mode = "none"
+
+    if quantization_mode == "int4" and not quantized:
+        if not _HAS_BITSANDBYTES or _BNB_LINEAR4 is None:
+            warnings.warn(
+                "bitsandbytes with Linear4bit not available; cannot perform int4 quantization.",
+                RuntimeWarning
+            )
+            quantization_mode = "none"
+        else:
+            print("Applying int4 quantization via bitsandbytes Linear4bit...")
+
+            def _convert_linear_to_4bit(module: nn.Module):
+                for name, child in list(module.named_children()):
+                    if isinstance(child, nn.Linear):
+                        if hasattr(_BNB_LINEAR4, "from_float"):
+                            quant_child = _BNB_LINEAR4.from_float(child)
+                        else:
+                            quant_child = _BNB_LINEAR4(
+                                child.in_features,
+                                child.out_features,
+                                bias=child.bias is not None,
+                                quant_type="nf4"
+                            )
+                            quant_child.weight.data.copy_(child.weight.data)
+                            if child.bias is not None:
+                                quant_child.bias = torch.nn.Parameter(child.bias.data.clone())
+                        setattr(module, name, quant_child)
+                    else:
+                        _convert_linear_to_4bit(child)
+
+            try:
+                model = model.to(dtype=torch.float32)
+                _convert_linear_to_4bit(model)
+                quantized = True
+                quantization_note = "int4 (bitsandbytes)"
+            except Exception as quant_err:
+                warnings.warn(
+                    f"Failed to apply int4 quantization ({quant_err}). Continuing without quantization.",
+                    RuntimeWarning
+                )
+                quantization_mode = "none"
+
+    # Convert precision (only if not quantized)
     dtype_map = {
         "fp32": torch.float32,
         "fp16": torch.float16,
@@ -878,11 +1186,16 @@ def load_dit360_model(
 
     dtype = dtype_map[precision]
 
-    if precision == "fp8":
+    if quantized:
+        dtype = torch.float32  # quantized modules operate in fp32 for activations
+    elif precision == "fp8":
         print("Warning: fp8 not fully supported, using fp16 instead")
 
-    print(f"Converting to {precision} ({dtype})...")
-    model = model.to(dtype=dtype)
+    if not quantized:
+        print(f"Converting to {precision} ({dtype})...")
+        model = model.to(dtype=dtype)
+    else:
+        print(f"Quantized model ready ({quantization_note}).")
 
     # Move to offload device initially (will load to GPU on demand)
     model = model.to(offload_device)
@@ -896,7 +1209,8 @@ def load_dit360_model(
         model=model,
         dtype=dtype,
         device=device,
-        offload_device=offload_device
+        offload_device=offload_device,
+        quantization_mode=quantization_mode
     )
 
     return wrapper

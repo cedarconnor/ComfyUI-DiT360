@@ -59,6 +59,49 @@ class DiT360Loader:
                     "tooltip": "Offload models to CPU when not in use to save VRAM. "
                                "Recommended: True (slower but uses less VRAM)"
                 }),
+            },
+            "optional": {
+                "attention_backend": (["auto", "eager", "xformers", "flash"], {
+                    "default": "auto",
+                    "tooltip": "Attention backend to use inside the DiT transformer. "
+                               "auto selects the best available (prefers xFormers, then FlashAttention)."
+                }),
+                "attention_slice_size": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 8192,
+                    "step": 1,
+                    "tooltip": "Chunk size for attention slicing. 0 disables slicing. "
+                               "Smaller values reduce VRAM usage at the cost of speed."
+                }),
+                "quantization_mode": (["none", "int8", "int4"], {
+                    "default": "none",
+                    "tooltip": "Optional model quantization. int8 uses torch dynamic quantization, "
+                               "int4 uses bitsandbytes if available."
+                }),
+                "vae_tile_size": ("INT", {
+                    "default": 1536,
+                    "min": 512,
+                    "max": 8192,
+                    "step": 64,
+                    "tooltip": "Tile height (pixels) for VAE encode/decode tiling. "
+                               "Larger tiles yield better quality but use more VRAM."
+                }),
+                "vae_tile_overlap": ("INT", {
+                    "default": 128,
+                    "min": 0,
+                    "max": 1024,
+                    "step": 16,
+                    "tooltip": "Overlap between VAE tiles (pixels). Helps hide seams when tiling is enabled."
+                }),
+                "vae_auto_tile_pixels": ("INT", {
+                    "default": 16777216,
+                    "min": 0,
+                    "max": 268435456,
+                    "step": 1048576,
+                    "tooltip": "Automatic tiling threshold in total image pixels. 0 uses internal default." 
+                               "If the image exceeds this count, tiling is used automatically."
+                }),
             }
         }
 
@@ -67,7 +110,20 @@ class DiT360Loader:
     FUNCTION = "load_models"
     CATEGORY = "DiT360/loaders"
 
-    def load_models(self, model_path, precision, vae_path, t5_path, offload_to_cpu):
+    def load_models(
+        self,
+        model_path,
+        precision,
+        vae_path,
+        t5_path,
+        offload_to_cpu,
+        attention_backend="auto",
+        attention_slice_size=0,
+        quantization_mode="none",
+        vae_tile_size=1536,
+        vae_tile_overlap=128,
+        vae_auto_tile_pixels=16777216
+    ):
         """Load all DiT360 components and return as pipeline object"""
         from .dit360 import load_dit360_model, load_vae, load_t5_encoder
         from pathlib import Path
@@ -80,6 +136,12 @@ class DiT360Loader:
         print(f"Precision: {precision}")
         print(f"Device: {device}")
         print(f"Offload: {offload_to_cpu}")
+        print(f"Attention backend (requested): {attention_backend}")
+        if attention_slice_size:
+            print(f"Attention slicing (requested): {attention_slice_size}")
+        print(f"Quantization mode (requested): {quantization_mode}")
+        auto_tile_display = "disabled" if vae_auto_tile_pixels == 0 else vae_auto_tile_pixels
+        print(f"VAE tiling config: tile={vae_tile_size}px overlap={vae_tile_overlap}px auto-threshold={auto_tile_display}")
         print(f"{'='*60}\n")
 
         # Prepare paths
@@ -116,6 +178,10 @@ class DiT360Loader:
             # Use default
             t5_full_path = models_dir / "t5" / "t5-v1_1-xxl"
 
+        # Resolve overrides for advanced options
+        slice_override = attention_slice_size if attention_slice_size > 0 else None
+        auto_tile_pixels = vae_auto_tile_pixels if vae_auto_tile_pixels > 0 else vae_auto_tile_pixels
+
         # Load components (with placeholder implementations for now)
         try:
             # Load DiT360 model
@@ -125,7 +191,11 @@ class DiT360Loader:
                     model_full_path,
                     precision=precision,
                     device=device,
-                    offload_device=offload_device
+                    offload_device=offload_device,
+                    enable_circular_padding=True,
+                    attention_backend=attention_backend,
+                    attention_slice_size=slice_override,
+                    quantization_mode=quantization_mode
                 )
             else:
                 print(f"  Model not found at: {model_full_path}")
@@ -139,7 +209,10 @@ class DiT360Loader:
                     vae_full_path,
                     precision=precision,
                     device=device,
-                    offload_device=offload_device
+                    offload_device=offload_device,
+                    tile_size=vae_tile_size,
+                    tile_overlap=vae_tile_overlap,
+                    max_tile_pixels=auto_tile_pixels
                 )
             else:
                 print(f"  VAE not found at: {vae_full_path}")
@@ -178,6 +251,12 @@ class DiT360Loader:
             "model_path": str(model_full_path),
             "vae_path": str(vae_full_path),
             "t5_path": str(t5_full_path),
+            "attention_backend": dit360_model.attention_backend if dit360_model else attention_backend,
+            "attention_slice_size": dit360_model.attention_slice_size if dit360_model else slice_override,
+            "quantization_mode": dit360_model.quantization_mode if dit360_model else quantization_mode,
+            "vae_tile_size": vae.tile_size if vae else vae_tile_size,
+            "vae_tile_overlap": vae.tile_overlap if vae else vae_tile_overlap,
+            "vae_auto_tile_pixels": vae.max_tile_pixels if vae else auto_tile_pixels,
         }
 
         print(f"\n{'='*60}")
@@ -185,6 +264,17 @@ class DiT360Loader:
         print(f"  Model: {'✓ Loaded' if dit360_model else '✗ Not loaded'}")
         print(f"  VAE: {'✓ Loaded' if vae else '✗ Not loaded'}")
         print(f"  T5: {'✓ Loaded' if text_encoder else '✗ Not loaded'}")
+        if dit360_model:
+            print(f"  Attention backend: {dit360_model.attention_backend} (slice={dit360_model.attention_slice_size})")
+            print(f"  Quantization: {dit360_model.quantization_mode}")
+        else:
+            print(f"  Attention backend: {pipeline['attention_backend']} (slice={pipeline['attention_slice_size']})")
+            print(f"  Quantization: {pipeline['quantization_mode']}")
+        if vae:
+            print(f"  VAE tiling: tile={vae.tile_size}px overlap={vae.tile_overlap}px auto-threshold={vae.max_tile_pixels}")
+        else:
+            requested_auto = "disabled" if auto_tile_pixels == 0 else auto_tile_pixels
+            print(f"  VAE tiling: tile={vae_tile_size}px overlap={vae_tile_overlap}px auto-threshold={requested_auto}")
         print(f"{'='*60}\n")
 
         return (pipeline,)
@@ -398,7 +488,37 @@ class DiT360Sampler:
                     "max": 1.0,
                     "step": 0.01,
                     "tooltip": "Weight for cube loss. Higher = less pole distortion. "
-                               "Recommended: 0.1 (default)"
+                                 "Recommended: 0.1 (default)"
+                }),
+                "scheduler_type": (["flow_match", "ddim"], {
+                    "default": "flow_match",
+                    "tooltip": "Sampling scheduler. flow_match (default) uses DiT360 rectified flow, ddim offers deterministic diffusion-style inference." 
+                }),
+                "timestep_schedule": (["linear", "quadratic", "cosine"], {
+                    "default": "linear",
+                    "tooltip": "Timestep schedule shaping noise distribution across steps."
+                }),
+                "scheduler_eta": ("FLOAT", {
+                    "default": 0.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.05,
+                    "tooltip": "DDIM sigma parameter (eta). 0 = deterministic, >0 adds stochasticity."
+                }),
+                "attention_backend": (["pipeline", "auto", "eager", "xformers", "flash"], {
+                    "default": "pipeline",
+                    "tooltip": "Attention implementation override for this run. 'pipeline' keeps settings from loader."
+                }),
+                "attention_slice_size": ("INT", {
+                    "default": -1,
+                    "min": -1,
+                    "max": 8192,
+                    "step": 1,
+                    "tooltip": "Attention slicing chunk size. -1 = pipeline default, 0 = disable slicing, >0 sets explicit chunk size."
+                }),
+                "log_memory_stats": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Print allocated and peak VRAM after generation (requires CUDA)."
                 }),
             }
         }
@@ -410,7 +530,10 @@ class DiT360Sampler:
 
     def generate(self, dit360_pipe, conditioning, width, height, steps, cfg_scale, seed,
                  circular_padding, latent_image=None, denoise=1.0, enable_yaw_loss=False,
-                 yaw_loss_weight=0.1, enable_cube_loss=False, cube_loss_weight=0.1):
+                 yaw_loss_weight=0.1, enable_cube_loss=False, cube_loss_weight=0.1,
+                 scheduler_type="flow_match", timestep_schedule="linear", scheduler_eta=0.0,
+                 attention_backend="pipeline", attention_slice_size=-1,
+                 log_memory_stats=False):
         """Generate panoramic latents using DiT360 model"""
 
         from .utils.equirect import validate_aspect_ratio
@@ -431,6 +554,12 @@ class DiT360Sampler:
             print(f"Yaw loss: enabled (weight={yaw_loss_weight})")
         if enable_cube_loss:
             print(f"Cube loss: enabled (weight={cube_loss_weight})")
+        print(f"Scheduler: {scheduler_type} (schedule={timestep_schedule}, eta={scheduler_eta})")
+        if attention_backend != "pipeline":
+            print(f"Attention override: backend={attention_backend}")
+        if attention_slice_size != -1:
+            slice_desc = "disabled" if attention_slice_size == 0 else attention_slice_size
+            print(f"Attention slicing override: {slice_desc}")
         print(f"{'='*60}\n")
 
         # Set seed for reproducibility
@@ -443,6 +572,11 @@ class DiT360Sampler:
 
         device = dit360_pipe["device"]
         dtype = dit360_pipe["dtype"]
+        if log_memory_stats and torch.cuda.is_available():
+            try:
+                torch.cuda.reset_peak_memory_stats(device)
+            except Exception:
+                torch.cuda.reset_peak_memory_stats()
 
         # Calculate latent dimensions (8x downscale for VAE)
         latent_height = height // 8
@@ -452,12 +586,29 @@ class DiT360Sampler:
         # Phase 3: Actual generation loop with flow matching
         # ================================================================
 
-        from .dit360 import FlowMatchScheduler
+        from .dit360 import create_scheduler, get_timestep_schedule
 
         # Get components from pipeline
-        model_wrapper = dit360_pipe["model"]
-        model = model_wrapper.model  # Unwrap the DiT360Model
-        text_encoder = dit360_pipe["text_encoder"]
+        model_wrapper = dit360_pipe.get("model")
+        model = getattr(model_wrapper, "model", None) if model_wrapper else None
+        text_encoder = dit360_pipe.get("text_encoder")
+
+        if model is None:
+            print("\n⚠ DiT360 model is not loaded. Returning zero latent.")
+            latent_placeholder = torch.zeros(1, 4, latent_height, latent_width, device=device, dtype=dtype)
+            return ({"samples": latent_placeholder},)
+
+        # Apply attention overrides if requested
+        override_kwargs = {}
+        backend_override_val = (attention_backend or "pipeline").lower()
+        if backend_override_val != "pipeline":
+            override_kwargs["backend"] = backend_override_val
+        if attention_slice_size != -1:
+            override_kwargs["slice_size"] = None if attention_slice_size == 0 else attention_slice_size
+
+        if override_kwargs:
+            model_wrapper.set_attention_options(**override_kwargs)
+        print(f"Attention backend in use: {model_wrapper.attention_backend} (slice={model_wrapper.attention_slice_size})")
 
         # Load model to device
         model_wrapper.load_to_device()
@@ -467,11 +618,21 @@ class DiT360Sampler:
         negative_prompt_embeds = conditioning.get("negative_prompt_embeds", None)
 
         # Initialize scheduler
-        scheduler = FlowMatchScheduler(
+        scheduler = create_scheduler(
+            scheduler_type,
             num_train_timesteps=1000,
-            shift=1.0
+            shift=1.0,
+            eta=scheduler_eta
         )
         scheduler.set_timesteps(steps, device=device)
+        if scheduler_type == "flow_match":
+            custom_timesteps = get_timestep_schedule(steps, method=timestep_schedule).to(device)
+            scheduler.timesteps = custom_timesteps
+        elif timestep_schedule != "linear":
+            print("Note: timestep_schedule currently only affects the flow_match scheduler.")
+
+        timesteps_tensor = scheduler.timesteps
+        total_steps = len(timesteps_tensor)
 
         # Initialize or use existing latent
         if latent_image is not None:
@@ -480,20 +641,26 @@ class DiT360Sampler:
 
             # Add noise based on denoise strength
             noise = torch.randn_like(latent_clean)
-            t_start = int((1.0 - denoise) * steps)
-            timestep = scheduler.timesteps[t_start] if t_start < len(scheduler.timesteps) else torch.tensor([1.0], device=device)
+            t_start = max(min(int((1.0 - denoise) * total_steps), total_steps - 1), 0)
+            timestep_value = timesteps_tensor[t_start]
+            if scheduler_type == "ddim":
+                timestep_for_noise = int(float(timestep_value)) if isinstance(timestep_value, torch.Tensor) else int(timestep_value)
+            else:
+                timestep_for_noise = timestep_value
 
-            # Mix clean and noise
-            latent = scheduler.add_noise(latent_clean, noise, timestep)
-            print(f"Using input latent: {latent.shape}, denoise={denoise}, start_step={t_start}")
+            latent = scheduler.add_noise(latent_clean, noise, timestep_for_noise)
+            print(f"Using input latent: {latent.shape}, denoise={denoise:.2f}, start_step={t_start}")
 
             # Adjust scheduler to start from t_start
-            scheduler.timesteps = scheduler.timesteps[t_start:]
+            scheduler.timesteps = timesteps_tensor[t_start:]
 
         else:
             # Text-to-image: Start from pure noise
             latent = torch.randn(1, 4, latent_height, latent_width, device=device, dtype=dtype)
             print(f"Initialized random latent: {latent.shape}")
+
+        timesteps_tensor = scheduler.timesteps
+        total_steps = len(timesteps_tensor)
 
         # Initialize loss modules if enabled
         yaw_loss_fn = None
@@ -510,35 +677,40 @@ class DiT360Sampler:
             cube_loss_fn = CubeLoss(face_size=max(64, min(latent_height, latent_width)), loss_type="l2")
             print(f"✓ Cube loss enabled (weight={cube_loss_weight})")
 
-        # Sampling loop with flow matching
+        # Sampling loop
         print(f"\nStarting generation loop...")
-        pbar = comfy.utils.ProgressBar(len(scheduler.timesteps))
+        pbar = comfy.utils.ProgressBar(total_steps)
 
-        for i, t in enumerate(scheduler.timesteps):
-            # Prepare timestep tensor
-            timestep = torch.tensor([t], device=device)
+        num_train_timesteps = getattr(scheduler, "num_train_timesteps", 1000)
+
+        for i, t in enumerate(timesteps_tensor):
+            if isinstance(t, torch.Tensor):
+                t_scalar = float(t.cpu().item())
+            else:
+                t_scalar = float(t)
+
+            if scheduler_type == "ddim":
+                normalized_t = t_scalar / max(num_train_timesteps - 1, 1)
+                timestep_model = torch.tensor([normalized_t], device=device, dtype=torch.float32)
+                scheduler_t_value = int(round(t_scalar))
+            else:
+                timestep_model = torch.tensor([t_scalar], device=device, dtype=torch.float32)
+                scheduler_t_value = t_scalar
 
             # Classifier-free guidance: Run model twice if we have negative prompt
             if cfg_scale != 1.0 and negative_prompt_embeds is not None:
-                # Concatenate latents for batched inference
                 latent_model_input = torch.cat([latent, latent], dim=0)
-                timestep_input = torch.cat([timestep, timestep], dim=0)
+                timestep_input = torch.cat([timestep_model, timestep_model], dim=0)
 
-                # Concatenate embeddings (positive and negative)
                 context = torch.cat([prompt_embeds, negative_prompt_embeds], dim=0)
 
-                # Single forward pass for both
                 noise_pred = model(latent_model_input, timestep_input, context)
 
-                # Split predictions
                 noise_pred_cond, noise_pred_uncond = noise_pred.chunk(2, dim=0)
-
-                # Apply CFG: pred = uncond + cfg_scale * (cond - uncond)
                 noise_pred = noise_pred_uncond + cfg_scale * (noise_pred_cond - noise_pred_uncond)
 
             else:
-                # No CFG: single forward pass
-                noise_pred = model(latent, timestep, prompt_embeds)
+                noise_pred = model(latent, timestep_model, prompt_embeds)
 
             # Apply geometric losses if enabled (Phase 4 Advanced Features)
             # Note: These losses are computed for monitoring/debugging during generation
@@ -571,12 +743,32 @@ class DiT360Sampler:
             # Apply scheduler step to update latent
             latent = scheduler.step(
                 model_output=noise_pred,
-                timestep=t.item(),
-                sample=latent
+                timestep=scheduler_t_value,
+                sample=latent,
+                guidance_scale=1.0,
+                negative_model_output=None,
+                step_index=i,
+                eta=scheduler_eta
             )
 
             # Progress update
             pbar.update(1)
+
+        if log_memory_stats and torch.cuda.is_available():
+            try:
+                torch.cuda.synchronize(device)
+            except Exception:
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+            try:
+                current_alloc = torch.cuda.memory_allocated(device) / (1024 ** 3)
+                peak_alloc = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
+            except Exception:
+                current_alloc = torch.cuda.memory_allocated() / (1024 ** 3)
+                peak_alloc = torch.cuda.max_memory_allocated() / (1024 ** 3)
+            print(f"VRAM stats — current: {current_alloc:.2f} GB, peak: {peak_alloc:.2f} GB")
 
         # Offload model to save VRAM
         model_wrapper.offload()
@@ -613,6 +805,33 @@ class DiT360Decode:
                     "tooltip": "Automatically blend left/right edges for seamless wraparound. "
                                "Recommended: True for panoramas, False for normal images"
                 }),
+            },
+            "optional": {
+                "tiling_mode": (["auto", "always", "never"], {
+                    "default": "auto",
+                    "tooltip": "VAE tiling mode. auto uses loader heuristics, always forces tiling, never disables tiling."
+                }),
+                "tile_size_override": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 8192,
+                    "step": 64,
+                    "tooltip": "Optional tile size override (pixels). 0 keeps loader default."
+                }),
+                "tile_overlap_override": ("INT", {
+                    "default": -1,
+                    "min": -1,
+                    "max": 1024,
+                    "step": 16,
+                    "tooltip": "Optional tile overlap override (pixels). -1 keeps loader default, 0 disables overlap."
+                }),
+                "max_tile_pixels_override": ("INT", {
+                    "default": -1,
+                    "min": -1,
+                    "max": 268435456,
+                    "step": 1048576,
+                    "tooltip": "Optional auto-tiling threshold override in total pixels. -1 keeps loader default, 0 disables auto-tiling."
+                }),
             }
         }
 
@@ -621,11 +840,21 @@ class DiT360Decode:
     FUNCTION = "decode"
     CATEGORY = "DiT360"
 
-    def decode(self, samples, dit360_pipe, auto_blend_edges):
+    def decode(
+        self,
+        samples,
+        dit360_pipe,
+        auto_blend_edges,
+        tiling_mode="auto",
+        tile_size_override=0,
+        tile_overlap_override=-1,
+        max_tile_pixels_override=-1
+    ):
         """Decode latents to images using VAE"""
 
         print(f"\nDecoding latents to image...")
         print(f"Auto blend edges: {auto_blend_edges}")
+        print(f"Tiling mode: {tiling_mode}")
 
         # Phase 3: Actual VAE decoding
         latent = samples["samples"]
@@ -634,8 +863,46 @@ class DiT360Decode:
         # Get VAE from pipeline
         vae = dit360_pipe["vae"]
 
+        if vae is None:
+            raise RuntimeError("DiT360 pipeline VAE is not loaded - cannot decode latents.")
+
+        # Configure tiling overrides
+        tile_size = tile_size_override if tile_size_override > 0 else vae.tile_size
+        tile_overlap = tile_overlap_override if tile_overlap_override >= 0 else vae.tile_overlap
+        max_tile_pixels = max_tile_pixels_override if max_tile_pixels_override >= 0 else vae.max_tile_pixels
+
+        vae.configure_tiling(
+            tile_size=tile_size,
+            tile_overlap=tile_overlap,
+            max_tile_pixels=max_tile_pixels
+        )
+
+        original_auto_threshold = vae.max_tile_pixels
+        reset_auto_threshold = False
+        if tiling_mode == "always":
+            use_tiling_flag = True
+        elif tiling_mode == "never":
+            use_tiling_flag = False
+            vae.configure_tiling(max_tile_pixels=0)
+            if max_tile_pixels_override < 0:
+                reset_auto_threshold = True
+        else:
+            # auto mode -> let heuristics decide (force flag False)
+            use_tiling_flag = False
+
+        print(f"VAE tiling configuration: tile={vae.tile_size}px overlap={vae.tile_overlap}px auto-threshold={vae.max_tile_pixels}")
+        if tiling_mode == "auto":
+            print("Use tiling this decode: auto (heuristics)")
+        elif tiling_mode == "always":
+            print("Use tiling this decode: forced on")
+        else:
+            print("Use tiling this decode: forced off")
+
         # Decode using VAE
-        image = vae.decode(latent, use_tiling=False)
+        image = vae.decode(latent, use_tiling=use_tiling_flag)
+
+        if reset_auto_threshold:
+            vae.configure_tiling(max_tile_pixels=original_auto_threshold)
 
         # Image dimensions
         height, width = image.shape[1], image.shape[2]
@@ -649,6 +916,242 @@ class DiT360Decode:
         print(f"✓ Decoded to {width}×{height} image")
 
         return (image,)
+
+
+# ====================================================================
+# NODE 4B: DiT360 Pipe Breakout / Combine
+# ====================================================================
+
+class DiT360PipeBreakout:
+    """
+    Extract model, VAE, and text encoder handles from a DiT360 pipeline.
+
+    Useful for advanced workflows where components need to be tweaked,
+    wrapped, or swapped independently before reassembling with the
+    DiT360PipeCombine node.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "dit360_pipe": ("DIT360_PIPE", {
+                    "tooltip": "DiT360 pipeline dictionary to break apart"
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("DIT360_MODEL", "DIT360_VAE", "DIT360_TEXT_ENCODER", "DIT360_PIPE")
+    RETURN_NAMES = ("model", "vae", "text_encoder", "passthrough")
+    FUNCTION = "breakout"
+    CATEGORY = "DiT360/utils"
+
+    def breakout(self, dit360_pipe):
+        """Return individual components while passing the original pipeline through."""
+        if not isinstance(dit360_pipe, dict):
+            raise TypeError("Expected dit360_pipe to be a dict produced by DiT360Loader.")
+
+        model = dit360_pipe.get("model")
+        vae = dit360_pipe.get("vae")
+        text_encoder = dit360_pipe.get("text_encoder")
+
+        print("\nBreaking out DiT360 pipeline components...")
+        print(f"  Model: {'✓' if model else '✗'}")
+        print(f"  VAE: {'✓' if vae else '✗'}")
+        print(f"  Text encoder: {'✓' if text_encoder else '✗'}")
+
+        passthrough = dict(dit360_pipe)
+        return (model, vae, text_encoder, passthrough)
+
+
+class DiT360PipeCombine:
+    """
+    Reassemble a DiT360 pipeline from individual components.
+
+    Accepts a base pipeline and optional overrides for model, VAE, text
+    encoder, and metadata (dtype, devices, attention options, tiling).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "base_pipe": ("DIT360_PIPE", {
+                    "tooltip": "Starting pipeline (usually output of DiT360Loader)"
+                }),
+            },
+            "optional": {
+                "model": ("DIT360_MODEL", {
+                    "tooltip": "Optional DiT360 model wrapper override"
+                }),
+                "vae": ("DIT360_VAE", {
+                    "tooltip": "Optional DiT360 VAE override"
+                }),
+                "text_encoder": ("DIT360_TEXT_ENCODER", {
+                    "tooltip": "Optional text encoder override"
+                }),
+                "dtype_override": ("STRING", {
+                    "default": "",
+                    "tooltip": "Override pipeline dtype (fp16, fp32, bf16). Leave empty to keep current."
+                }),
+                "device_override": ("STRING", {
+                    "default": "",
+                    "tooltip": "Override compute device string (e.g., 'cuda:0', 'cpu')."
+                }),
+                "offload_device_override": ("STRING", {
+                    "default": "",
+                    "tooltip": "Override offload device string."
+                }),
+                "quantization_override": (["pipeline", "none", "int8", "int4"], {
+                    "default": "pipeline",
+                    "tooltip": "Override quantization mode recorded in pipeline."
+                }),
+                "attention_backend_override": (["pipeline", "auto", "eager", "xformers", "flash"], {
+                    "default": "pipeline",
+                    "tooltip": "Override attention backend recorded in pipeline (and update model when present)."
+                }),
+                "attention_slice_override": ("INT", {
+                    "default": -1,
+                    "min": -1,
+                    "max": 8192,
+                    "step": 1,
+                    "tooltip": "Override attention slice size (-1 keeps current, 0 disables slicing)."
+                }),
+                "vae_tile_size_override": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 8192,
+                    "step": 64,
+                    "tooltip": "Override VAE tile size in pixels (0 keeps current)."
+                }),
+                "vae_tile_overlap_override": ("INT", {
+                    "default": -1,
+                    "min": -1,
+                    "max": 1024,
+                    "step": 16,
+                    "tooltip": "Override VAE tile overlap in pixels (-1 keeps current)."
+                }),
+                "vae_auto_tile_override": ("INT", {
+                    "default": -1,
+                    "min": -1,
+                    "max": 268435456,
+                    "step": 1048576,
+                    "tooltip": "Override VAE auto tiling threshold in pixels (-1 keeps current, 0 disables)."
+                }),
+                "refresh_metadata_from_components": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Pull dtype/device/tiling metadata from supplied components when available."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("DIT360_PIPE",)
+    RETURN_NAMES = ("dit360_pipe",)
+    FUNCTION = "combine"
+    CATEGORY = "DiT360/utils"
+
+    def combine(
+        self,
+        base_pipe,
+        model=None,
+        vae=None,
+        text_encoder=None,
+        dtype_override="",
+        device_override="",
+        offload_device_override="",
+        quantization_override="pipeline",
+        attention_backend_override="pipeline",
+        attention_slice_override=-1,
+        vae_tile_size_override=0,
+        vae_tile_overlap_override=-1,
+        vae_auto_tile_override=-1,
+        refresh_metadata_from_components=True,
+    ):
+        if not isinstance(base_pipe, dict):
+            raise TypeError("base_pipe must be the dictionary produced by DiT360Loader.")
+
+        pipeline = dict(base_pipe)
+
+        if model is not None:
+            pipeline["model"] = model
+        if vae is not None:
+            pipeline["vae"] = vae
+        if text_encoder is not None:
+            pipeline["text_encoder"] = text_encoder
+
+        if refresh_metadata_from_components:
+            if model is not None:
+                pipeline["dtype"] = getattr(model, "dtype", pipeline.get("dtype"))
+                pipeline["device"] = getattr(model, "device", pipeline.get("device"))
+                pipeline["offload_device"] = getattr(model, "offload_device", pipeline.get("offload_device"))
+                pipeline["attention_backend"] = getattr(model, "attention_backend", pipeline.get("attention_backend", "auto"))
+                pipeline["attention_slice_size"] = getattr(model, "attention_slice_size", pipeline.get("attention_slice_size"))
+                pipeline["quantization_mode"] = getattr(model, "quantization_mode", pipeline.get("quantization_mode", "none"))
+            if vae is not None:
+                pipeline["vae_tile_size"] = getattr(vae, "tile_size", pipeline.get("vae_tile_size", 1536))
+                pipeline["vae_tile_overlap"] = getattr(vae, "tile_overlap", pipeline.get("vae_tile_overlap", 128))
+                pipeline["vae_auto_tile_pixels"] = getattr(vae, "max_tile_pixels", pipeline.get("vae_auto_tile_pixels", 16777216))
+
+        dtype_map = {
+            "fp16": torch.float16,
+            "fp32": torch.float32,
+            "bf16": torch.bfloat16,
+        }
+        dtype_key = dtype_override.strip().lower()
+        if dtype_key:
+            if dtype_key not in dtype_map:
+                raise ValueError(f"Unsupported dtype_override '{dtype_override}'. Use fp16, fp32, or bf16.")
+            pipeline["dtype"] = dtype_map[dtype_key]
+
+        if device_override.strip():
+            pipeline["device"] = torch.device(device_override.strip())
+        if offload_device_override.strip():
+            pipeline["offload_device"] = torch.device(offload_device_override.strip())
+
+        if quantization_override != "pipeline":
+            pipeline["quantization_mode"] = quantization_override
+
+        if attention_backend_override != "pipeline":
+            pipeline["attention_backend"] = attention_backend_override
+            model_to_update = pipeline.get("model")
+            if model_to_update is not None and hasattr(model_to_update, "set_attention_options"):
+                model_to_update.set_attention_options(backend=attention_backend_override)
+
+        if attention_slice_override >= 0:
+            slice_val = None if attention_slice_override == 0 else attention_slice_override
+            pipeline["attention_slice_size"] = slice_val
+            model_to_update = pipeline.get("model")
+            if model_to_update is not None and hasattr(model_to_update, "set_attention_options"):
+                model_to_update.set_attention_options(slice_size=slice_val)
+
+        if vae_tile_size_override > 0 or vae_tile_overlap_override >= 0 or vae_auto_tile_override >= 0:
+            vae_obj = pipeline.get("vae")
+            if vae_obj is not None and hasattr(vae_obj, "configure_tiling"):
+                tile_size = vae_tile_size_override if vae_tile_size_override > 0 else getattr(vae_obj, "tile_size", 1536)
+                tile_overlap = vae_tile_overlap_override if vae_tile_overlap_override >= 0 else getattr(vae_obj, "tile_overlap", 128)
+                auto_pixels = vae_auto_tile_override if vae_auto_tile_override >= 0 else getattr(vae_obj, "max_tile_pixels", 16777216)
+                vae_obj.configure_tiling(
+                    tile_size=tile_size,
+                    tile_overlap=tile_overlap,
+                    max_tile_pixels=auto_pixels,
+                )
+                pipeline["vae_tile_size"] = tile_size
+                pipeline["vae_tile_overlap"] = tile_overlap
+                pipeline["vae_auto_tile_pixels"] = auto_pixels
+
+        print("\nCombining DiT360 pipeline components...")
+        print(f"  Model: {'✓' if pipeline.get('model') else '✗'}")
+        print(f"  VAE: {'✓' if pipeline.get('vae') else '✗'}")
+        print(f"  Text encoder: {'✓' if pipeline.get('text_encoder') else '✗'}")
+        print(f"  dtype: {pipeline.get('dtype')}")
+        print(f"  device: {pipeline.get('device')}")
+        print(f"  offload: {pipeline.get('offload_device')}")
+        print(f"  attention backend: {pipeline.get('attention_backend')}")
+        print(f"  attention slice: {pipeline.get('attention_slice_size')}")
+        print(f"  quantization: {pipeline.get('quantization_mode')}")
+        print(f"  VAE tiling: {pipeline.get('vae_tile_size')}px/{pipeline.get('vae_tile_overlap')}px auto={pipeline.get('vae_auto_tile_pixels')}")
+
+        return (pipeline,)
 
 
 # ====================================================================
@@ -1081,6 +1584,8 @@ NODE_CLASS_MAPPINGS = {
     "DiT360TextEncode": DiT360TextEncode,
     "DiT360Sampler": DiT360Sampler,
     "DiT360Decode": DiT360Decode,
+    "DiT360PipeBreakout": DiT360PipeBreakout,
+    "DiT360PipeCombine": DiT360PipeCombine,
     "Equirect360Process": Equirect360Process,
     "Equirect360Preview": Equirect360Preview,
     "DiT360LoRALoader": DiT360LoRALoader,
@@ -1092,6 +1597,8 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "DiT360TextEncode": "DiT360 Text Encode",
     "DiT360Sampler": "DiT360 Sampler",
     "DiT360Decode": "DiT360 Decode",
+    "DiT360PipeBreakout": "DiT360 Pipe Breakout",
+    "DiT360PipeCombine": "DiT360 Pipe Combine",
     "Equirect360Process": "Equirect360 Process",
     "Equirect360Preview": "Equirect360 Preview",
     "DiT360LoRALoader": "DiT360 LoRA Loader",

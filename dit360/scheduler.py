@@ -113,7 +113,9 @@ class FlowMatchScheduler:
         timestep: float,
         sample: torch.Tensor,
         guidance_scale: float = 1.0,
-        negative_model_output: Optional[torch.Tensor] = None
+        negative_model_output: Optional[torch.Tensor] = None,
+        step_index: Optional[int] = None,
+        eta: Optional[float] = None
     ) -> torch.Tensor:
         """
         Perform one step of the sampling process using Euler method
@@ -142,6 +144,144 @@ class FlowMatchScheduler:
         prev_sample = sample - model_output * dt
 
         return prev_sample
+
+
+class DDIMSchedulerLite:
+    """
+    Minimal DDIM scheduler implementation for inference-time experimentation.
+
+    This intentionally keeps the interface similar to FlowMatchScheduler so the
+    sampler can switch between them without large code changes.
+    """
+
+    def __init__(
+        self,
+        num_train_timesteps: int = 1000,
+        beta_start: float = 0.00085,
+        beta_end: float = 0.012,
+        eta: float = 0.0
+    ):
+        self.num_train_timesteps = num_train_timesteps
+        self.eta = eta
+
+        betas = torch.linspace(beta_start, beta_end, num_train_timesteps)
+        alphas = 1.0 - betas
+        self.alphas_cumprod = torch.cumprod(alphas, dim=0)
+        self.alphas_cumprod_prev = torch.cat([
+            self.alphas_cumprod.new_tensor([1.0]),
+            self.alphas_cumprod[:-1]
+        ])
+
+        self.timesteps = None
+        self.num_inference_steps = None
+
+    def set_timesteps(self, num_inference_steps: int, device: Optional[torch.device] = None):
+        """Set timesteps descending from training range."""
+        self.num_inference_steps = num_inference_steps
+        timesteps = torch.linspace(
+            self.num_train_timesteps - 1,
+            0,
+            num_inference_steps,
+            dtype=torch.long,
+            device=device
+        )
+        self.timesteps = timesteps
+
+    def step(
+        self,
+        model_output: torch.Tensor,
+        timestep: torch.Tensor,
+        sample: torch.Tensor,
+        guidance_scale: float = 1.0,
+        negative_model_output: Optional[torch.Tensor] = None,
+        step_index: Optional[int] = None,
+        eta: Optional[float] = None
+    ) -> torch.Tensor:
+        if negative_model_output is not None and guidance_scale != 1.0:
+            model_output = negative_model_output + guidance_scale * (model_output - negative_model_output)
+
+        if isinstance(timestep, torch.Tensor):
+            timestep_index = int(timestep[0].item()) if timestep.numel() == 1 else int(timestep.item())
+        else:
+            timestep_index = int(timestep)
+
+        if step_index is None and self.timesteps is not None:
+            # locate current timestep in the list
+            matches = (self.timesteps == timestep_index).nonzero()
+            if matches.numel() > 0:
+                step_index = int(matches[0].item())
+
+        if step_index is None:
+            step_index = 0
+
+        is_last = step_index == len(self.timesteps) - 1
+        prev_timestep_index = 0 if is_last else int(self.timesteps[step_index + 1].item())
+
+        alpha_prod_t = self.alphas_cumprod[timestep_index]
+        alpha_prod_prev = self.alphas_cumprod_prev[prev_timestep_index]
+        sqrt_alpha_prod_t = torch.sqrt(alpha_prod_t)
+        sqrt_alpha_prod_prev = torch.sqrt(alpha_prod_prev)
+        sqrt_one_minus_alpha_prod_t = torch.sqrt(1.0 - alpha_prod_t)
+
+        # Predict original sample from noise prediction
+        pred_original_sample = (sample - sqrt_one_minus_alpha_prod_t * model_output) / sqrt_alpha_prod_t
+
+        # Compute variance
+        eta = self.eta if eta is None else eta
+        sigma = 0.0
+        if eta > 0 and not is_last:
+            var = (1.0 - alpha_prod_prev) / (1.0 - alpha_prod_t) * (1.0 - alpha_prod_t / alpha_prod_prev)
+            sigma = eta * torch.sqrt(var)
+
+        # Direction pointing to x_t
+        dir_xt = torch.sqrt(torch.clamp(1.0 - alpha_prod_prev - sigma ** 2, min=0.0)) * model_output
+
+        noise = sigma * torch.randn_like(sample) if sigma > 0 else 0.0
+
+        prev_sample = sqrt_alpha_prod_prev * pred_original_sample + dir_xt + noise
+        return prev_sample
+
+    def add_noise(
+        self,
+        original_samples: torch.Tensor,
+        noise: torch.Tensor,
+        timesteps: torch.Tensor
+    ) -> torch.Tensor:
+        if isinstance(timesteps, torch.Tensor):
+            t_indices = timesteps.to(dtype=torch.long).view(-1)
+        else:
+            t_indices = torch.tensor([int(timesteps)], device=original_samples.device, dtype=torch.long)
+
+        alphas = self.alphas_cumprod.to(original_samples.device)
+        sqrt_alphas = torch.sqrt(alphas[t_indices])
+        sqrt_one_minus_alphas = torch.sqrt(1.0 - alphas[t_indices])
+
+        while sqrt_alphas.ndim < original_samples.ndim:
+            sqrt_alphas = sqrt_alphas.view(-1, *([1] * (original_samples.ndim - 1)))
+            sqrt_one_minus_alphas = sqrt_one_minus_alphas.view(-1, *([1] * (original_samples.ndim - 1)))
+
+        return sqrt_alphas * original_samples + sqrt_one_minus_alphas * noise
+
+
+def create_scheduler(
+    scheduler_type: str,
+    **kwargs
+):
+    scheduler_type = scheduler_type.lower()
+    if scheduler_type in {"flow_match", "flow"}:
+        return FlowMatchScheduler(
+            num_train_timesteps=kwargs.get("num_train_timesteps", 1000),
+            shift=kwargs.get("shift", 1.0),
+            use_dynamic_shifting=kwargs.get("use_dynamic_shifting", False)
+        )
+    if scheduler_type == "ddim":
+        return DDIMSchedulerLite(
+            num_train_timesteps=kwargs.get("num_train_timesteps", 1000),
+            beta_start=kwargs.get("beta_start", 0.00085),
+            beta_end=kwargs.get("beta_end", 0.012),
+            eta=kwargs.get("eta", 0.0)
+        )
+    raise ValueError(f"Unknown scheduler type: {scheduler_type}")
 
     def add_noise(
         self,
