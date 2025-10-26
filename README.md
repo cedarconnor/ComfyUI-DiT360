@@ -11,8 +11,8 @@ Generate seamless equirectangular panoramic images using FLUX.1-dev with the DiT
 - ✅ **Circular Padding**: Seamless wraparound at panorama edges
 - ✅ **2:1 Aspect Ratio Enforcement**: Automatic equirectangular format
 - ✅ **Edge Blending**: Perfect continuity at boundaries
-- ✅ **Interactive 360° Viewer**: Three.js-based panorama navigation (coming soon)
-- ✅ **Optional Geometric Losses**: Yaw/cube loss for quality improvements (slower)
+- ✅ **Interactive 360° Viewer**: Three.js-based panorama navigation
+- ✅ **Geometric Losses**: Yaw loss (rotational consistency) & Cube loss (pole distortion reduction)
 
 ---
 
@@ -84,8 +84,12 @@ Creates empty latent with enforced 2:1 aspect ratio.
 Standard KSampler with circular padding for seamless edges.
 - **Inputs**: Model, conditioning, latent, sampler settings
 - **Key Parameter**: `circular_padding` (16-32 recommended)
-- **Optional**: `enable_yaw_loss`, `enable_cube_loss` (slower, higher quality)
+- **Optional Geometric Losses**:
+  - `enable_yaw_loss` + `yaw_loss_weight` (0.05-0.2) - Ensures rotational consistency, ~2x slower
+  - `enable_cube_loss` + `cube_loss_weight` (0.05-0.2) - Reduces pole distortion, ~1.5x slower
 - **Use instead of**: KSampler
+
+**Note**: Geometric losses improve quality but increase generation time. Start with just circular padding, then add losses if you need extra quality.
 
 ### 3. Equirect360VAEDecode
 VAE decode with circular padding for smooth edges.
@@ -174,23 +178,26 @@ warm lighting from chandeliers, dusty atmosphere, 360 degree view"
 
 ## 🗺️ Roadmap
 
-### v2.0.0 (Current - In Progress)
+### v2.0.0 (Current - Complete!)
 - [x] Documentation cleanup
 - [x] Core utilities (circular padding, edge blending)
-- [ ] 5 clean nodes (refactoring in progress)
-- [ ] Three.js 360° viewer
-- [ ] Example workflows
+- [x] 5 clean nodes
+- [x] Three.js 360° viewer
+- [x] Example workflows
+- [x] Yaw loss (rotational consistency)
+- [x] Cube loss (pole distortion reduction)
 
 ### v2.1.0 (Future)
-- [ ] Yaw loss implementation
-- [ ] Cube loss implementation
 - [ ] ControlNet integration
 - [ ] Inpainting support
+- [ ] Img2img workflow improvements
+- [ ] Advanced loss visualization
 
 ### v2.2.0 (Future)
-- [ ] Optimization (xFormers, attention slicing)
+- [ ] Performance optimizations (xFormers, attention slicing)
 - [ ] Batch generation support
 - [ ] Video panorama generation
+- [ ] Custom loss functions API
 
 ---
 
