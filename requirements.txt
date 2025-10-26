@@ -1,0 +1,10 @@
+# ComfyUI-DiT360 Requirements
+# Minimal dependencies - ComfyUI already provides torch, numpy, etc.
+
+# Core dependencies (should already be in ComfyUI)
+torch>=2.0.0
+numpy>=1.25.0
+Pillow>=10.0.0
+
+# Optional: Memory-efficient attention (if not already in ComfyUI)
+# xformers>=0.0.22  # Uncomment if you need it and it's not installed
