@@ -41,6 +41,35 @@ def validate_aspect_ratio(width: int, height: int, tolerance: float = 0.01) -> b
     return abs(ratio - 2.0) < tolerance
 
 
+def get_equirect_dimensions(
+    width: int,
+    alignment: int = 16
+) -> Tuple[int, int]:
+    """
+    Calculate valid equirectangular dimensions with proper alignment
+
+    Args:
+        width: Desired width in pixels
+        alignment: Pixel alignment requirement (16 for FLUX)
+
+    Returns:
+        (width, height) tuple with correct 2:1 ratio and alignment
+
+    Example:
+        >>> get_equirect_dimensions(2048, alignment=16)
+        (2048, 1024)
+        >>> get_equirect_dimensions(2055, alignment=16)  # Auto-aligns
+        (2048, 1024)
+    """
+    # Ensure width is multiple of alignment
+    width = (width // alignment) * alignment
+
+    # Height is exactly half for 2:1 ratio
+    height = width // 2
+
+    return width, height
+
+
 def fix_aspect_ratio(
     image: torch.Tensor,
     mode: Literal["pad", "crop", "stretch"] = "pad",

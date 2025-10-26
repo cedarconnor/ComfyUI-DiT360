@@ -1,26 +1,43 @@
-# ComfyUI-DiT360 Technical Design Document
+# ComfyUI-DiT360 Technical Design Document (Streamlined)
+## 360° Panorama Generation with FLUX.1-dev + DiT360 LoRA
+
+---
 
 ## 1. Executive Summary
 
 ### 1.1 Project Overview
-ComfyUI-DiT360 is a custom node pack that integrates the DiT360 panoramic image generation model into ComfyUI's node-based workflow system. DiT360 is a 12-billion-parameter diffusion transformer built on FLUX.1-dev that generates high-fidelity 360-degree equirectangular panoramic images through hybrid training combining synthetic panoramic data with perspective images.
+ComfyUI-DiT360 adds 360-degree equirectangular panorama capabilities to standard ComfyUI workflows using FLUX.1-dev with the DiT360 LoRA adapter. This is **not** a full model wrapper—DiT360 is simply a LoRA weight file that enhances FLUX for panoramic generation.
 
-### 1.2 Key Objectives
-- Provide seamless integration of DiT360 into ComfyUI workflows
-- Support text-to-panorama, image-to-panorama, inpainting, and outpainting
-- Ensure Windows compatibility with proper path handling and CUDA management
-- Implement efficient memory management for 12B parameter model
-- Support multiple precision levels (fp32, fp16, bf16, fp8)
-- Provide interactive 360° panorama viewing capabilities
-- Maintain compatibility with existing ComfyUI node ecosystem
+**Key Insight**: DiT360 is distributed as a **LoRA adapter** (~2-5GB), not a full 12B parameter model. Users load FLUX.1-dev normally, then apply the DiT360 LoRA like any other LoRA in ComfyUI.
 
-### 1.3 Success Criteria
-- Loads and runs on Windows 10/11 with NVIDIA GPUs (16GB+ VRAM)
-- Generates 2048×1024 panoramas in under 2 minutes (50 steps)
-- Properly handles equirectangular format with seamless edge wrapping
-- Compatible with ComfyUI Manager for easy installation
-- Clear error messages and comprehensive documentation
-- No conflicts with major node packs (Impact-Pack, Manager, WAS Suite)
+### 1.2 Core Features
+- **Circular Padding**: Seamless wraparound at panorama edges (applied in sampling + VAE)
+- **Yaw Loss**: Optional rotational consistency improvement (2-3x slower)
+- **Cube Loss**: Optional pole distortion reduction (2-3x slower)  
+- **2:1 Aspect Ratio Enforcement**: Helpers for equirectangular format
+- **Interactive 360° Viewer**: Three.js-based panorama navigation
+
+### 1.3 Integration Approach
+Works as **drop-in enhancements** to standard FLUX workflows:
+
+```
+Standard FLUX Workflow:
+Load Checkpoint → Load LoRA → CLIP Encode → KSampler → VAE Decode → Save
+
+With DiT360 Enhancements:
+Load Checkpoint → Load LoRA (DiT360) → CLIP Encode → 
+  [Equirect360EmptyLatent] → [Equirect360KSampler] → 
+  [Equirect360VAEDecode] → [Equirect360EdgeBlender] → 
+  [Equirect360Viewer]
+```
+
+### 1.4 Node Count
+**Only 5 new nodes** (minimal, composable):
+1. `Equirect360EmptyLatent` - 2:1 aspect ratio helper
+2. `Equirect360KSampler` - Sampling with circular padding + losses
+3. `Equirect360VAEDecode` - VAE decode with circular padding
+4. `Equirect360EdgeBlender` - Post-processing edge blending
+5. `Equirect360Viewer` - Interactive preview
 
 ---
 
@@ -30,72 +47,72 @@ ComfyUI-DiT360 is a custom node pack that integrates the DiT360 panoramic image 
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    ComfyUI Core System                      │
-│                 (Node Discovery & Execution)                │
-└────────────────┬────────────────────────────────────────────┘
-                 │
-                 │ Loads and Registers
-                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│              ComfyUI-DiT360 Node Pack                       │
+│              Standard ComfyUI FLUX Workflow                 │
 ├─────────────────────────────────────────────────────────────┤
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐     │
-│  │ Model Loader │  │Text Encoder  │  │  VAE Loader  │     │
-│  │    Nodes     │  │    Nodes     │  │    Nodes     │     │
-│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘     │
-│         │                  │                  │             │
-│         └──────────────────┼──────────────────┘             │
-│                            ▼                                │
-│                  ┌──────────────────┐                       │
-│                  │  Sampler Node    │                       │
-│                  │  (Generation)    │                       │
-│                  └────────┬─────────┘                       │
-│                           │                                 │
-│         ┌─────────────────┼─────────────────┐              │
-│         ▼                 ▼                 ▼               │
-│  ┌──────────┐      ┌──────────┐     ┌──────────┐          │
-│  │Validator │      │ Decoder  │     │ Preview  │          │
-│  │  Nodes   │      │  Nodes   │     │  Nodes   │          │
-│  └──────────┘      └──────────┘     └──────────┘          │
-└─────────────────────────────────────────────────────────────┘
-                 │
-                 │ Manages
-                 ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Model & Data Layer                             │
-├─────────────────────────────────────────────────────────────┤
-│  • DiT360 Model Weights (Hugging Face Hub)                 │
-│  • FLUX.1-dev Base Model                                    │
-│  • Text Encoders (T5, CLIP)                                │
-│  • VAE (Encoder/Decoder)                                    │
-│  • LoRA Weights                                             │
+│                                                             │
+│  Load Checkpoint (FLUX.1-dev)                              │
+│         ↓                                                   │
+│  Load LoRA (DiT360.safetensors)  ← Standard LoRA!         │
+│         ↓                                                   │
+│  CLIP Text Encode (Positive/Negative)                      │
+│         ↓                                                   │
+│  ┌──────────────────────────────────────┐                  │
+│  │  DiT360 Enhancement Layer (NEW)      │                  │
+│  ├──────────────────────────────────────┤                  │
+│  │  Equirect360EmptyLatent              │                  │
+│  │    ↓                                 │                  │
+│  │  Equirect360KSampler                 │                  │
+│  │    ↓                                 │                  │
+│  │  Equirect360VAEDecode                │                  │
+│  │    ↓                                 │                  │
+│  │  Equirect360EdgeBlender              │                  │
+│  │    ↓                                 │                  │
+│  │  Equirect360Viewer                   │                  │
+│  └──────────────────────────────────────┘                  │
+│         ↓                                                   │
+│  Save Image (Standard)                                      │
+│                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ### 2.2 Component Breakdown
 
-#### 2.2.1 Model Loading Components
-- **DiT360ModelLoader**: Main transformer model loader
-- **DiT360TextEncoderLoader**: T5/CLIP text encoder loader
-- **DiT360VAELoader**: VAE autoencoder loader
-- **DiT360LoRALoader**: LoRA weight loader (optional)
+#### Standard FLUX Components (User Provides)
+- **Load Checkpoint**: Load FLUX.1-dev model (standard node)
+- **Load LoRA**: Load DiT360.safetensors (standard node)
+- **CLIP Text Encode**: Encode prompts (standard node)
+- **VAE** (optional): Custom VAE or use FLUX's built-in
 
-#### 2.2.2 Generation Components
-- **DiT360Sampler**: Core sampling/generation node
-- **DiT360SamplerAdvanced**: Advanced sampler with geometric losses
-- **DiT360ConditioningCombine**: Combine multiple conditioning inputs
+#### New DiT360 Enhancement Nodes
 
-#### 2.2.3 Processing Components
-- **DiT360Decode**: Latent to image decoder
-- **DiT360Encode**: Image to latent encoder
-- **DiT360InpaintPrep**: Prepare images/masks for inpainting
+**1. Equirect360EmptyLatent**
+- Purpose: Create empty latent with enforced 2:1 aspect ratio
+- Replaces: `EmptyLatentImage`
+- Why needed: Prevents user errors with wrong dimensions
 
-#### 2.2.4 Validation & Utility Components
-- **Equirect360Validator**: Validate and fix equirectangular format
-- **Equirect360EdgeBlender**: Seamless edge blending
-- **Equirect360Preview**: Interactive 360° viewer
-- **Equirect360ToRectilinear**: Convert to flat perspective view
-- **Equirect360ToCubemap**: Convert to cubemap format
+**2. Equirect360KSampler** ⭐ CORE NODE
+- Purpose: Sampling with circular padding for seamless edges
+- Replaces: `KSampler` / `KSamplerAdvanced`
+- Features:
+  - Circular padding applied to latent at each step
+  - Optional yaw loss (rotational consistency)
+  - Optional cube loss (pole handling)
+  - Works with any sampler/scheduler combination
+
+**3. Equirect360VAEDecode**
+- Purpose: VAE decode with circular padding
+- Replaces: `VAEDecode`
+- Why needed: Extra edge smoothing during upscaling
+
+**4. Equirect360EdgeBlender**
+- Purpose: Post-process edge blending
+- Replaces: Nothing (new functionality)
+- Why needed: Final polish for perfect wraparound
+
+**5. Equirect360Viewer**
+- Purpose: Interactive 360° preview
+- Replaces: `PreviewImage` (for panoramas)
+- Why needed: Standard preview doesn't show 360° properly
 
 ---
 
@@ -105,333 +122,399 @@ ComfyUI-DiT360 is a custom node pack that integrates the DiT360 panoramic image 
 
 #### Minimum Requirements
 - **OS**: Windows 10/11 (64-bit), Linux (Ubuntu 20.04+)
-- **GPU**: NVIDIA GPU with 16GB VRAM (RTX 3090, 4080, etc.)
+- **GPU**: NVIDIA GPU with 12GB VRAM (RTX 3060 12GB, 3080, 4070)
 - **CUDA**: 11.8 or 12.x
 - **RAM**: 16GB system memory
-- **Storage**: 100GB free SSD space
+- **Storage**: 30GB free SSD space (FLUX + LoRA + VAE)
 - **Python**: 3.9 - 3.12
 
 #### Recommended Requirements
-- **GPU**: NVIDIA GPU with 24GB VRAM (RTX 4090, A5000, etc.)
+- **GPU**: NVIDIA GPU with 16GB+ VRAM (RTX 4080, 4090, A5000)
 - **RAM**: 32GB system memory
-- **Storage**: 250GB NVMe SSD
-- **Python**: 3.12
+- **Storage**: 50GB NVMe SSD
 
 ### 3.2 Dependencies
 
-#### Core Dependencies
+#### Core Dependencies (Minimal)
 ```
 torch>=2.0.0,<3.0.0
-torchvision>=0.15.0
-transformers>=4.28.1
-diffusers>=0.25.0
-safetensors>=0.4.2
-accelerate>=0.26.0
-huggingface-hub>=0.20.0
+numpy>=1.25.0
+Pillow>=10.0.0
 ```
+
+**No additional dependencies** beyond standard ComfyUI! All functionality uses PyTorch primitives.
 
 #### Optional Dependencies
 ```
-opencv-python>=4.8.0  # For advanced image processing
-Pillow>=10.0.0  # Image handling
-numpy>=1.25.0  # Numerical operations
+# For faster attention (if not already in ComfyUI)
+xformers>=0.0.22  # Optional for memory-efficient attention
 ```
 
 ### 3.3 Model Specifications
 
-#### DiT360 Model Architecture
-- **Base Model**: FLUX.1-dev (12B parameters)
-- **Architecture**: Diffusion Transformer (DiT)
-- **Training**: Hybrid (Matterport3D panoramas + perspective images)
-- **Input Resolution**: Text prompts (up to 512 tokens)
-- **Output Resolution**: 2048×1024 (default), supports 1024×512 to 4096×2048
-- **Aspect Ratio**: 2:1 (equirectangular requirement)
-- **Latent Channels**: 4 (VAE compression)
-- **Latent Downscale**: 8x (256×128 latent for 2048×1024 image)
+#### FLUX.1-dev Base Model
+- **Size**: ~24GB (fp16), ~12GB (fp8)
+- **Source**: Black Forest Labs via Hugging Face
+- **License**: FLUX.1-dev license (non-commercial research)
+- **Location**: Standard ComfyUI `models/checkpoints/`
 
-#### Key Features
-- **Circular Padding**: Seamless wraparound at panorama edges
-- **Yaw Loss**: Rotational invariance for consistent panoramas
-- **Cube Loss**: Multi-scale distortion awareness (pole handling)
-- **Flow Matching**: Advanced sampling with RoPE for spherical geometry
+#### DiT360 LoRA
+- **Size**: ~2-5GB (typical LoRA size)
+- **Source**: Insta360-Research via Hugging Face
+- **Format**: Standard safetensors LoRA
+- **Location**: Standard ComfyUI `models/loras/`
+- **Hugging Face**: `Insta360-Research/DiT360-Panorama-Image-Generation`
+
+#### Output Specifications
+- **Format**: Equirectangular projection (2:1 aspect ratio)
+- **Common Resolutions**: 
+  - Fast: 1024×512 (12GB VRAM)
+  - Standard: 2048×1024 (16GB VRAM)
+  - High Quality: 4096×2048 (24GB+ VRAM)
+- **Latent Space**: Standard FLUX latent (16x compression)
+- **Color Space**: RGB, values [0, 1]
 
 ---
 
-## 4. Data Flow & Processing Pipeline
+## 4. Node Specifications
 
-### 4.1 Text-to-Panorama Pipeline
+### 4.1 Equirect360EmptyLatent
 
-```
-User Input (Text Prompt)
-        ↓
-Text Encoding (T5/CLIP)
-        ↓
-Conditioning Embeddings
-        ↓
-Initial Latent Noise (256×128×4)
-        ↓
-Iterative Denoising Loop (50 steps)
-│   ├─ Apply Circular Padding
-│   ├─ Transformer Forward Pass
-│   ├─ Calculate Yaw Loss (optional)
-│   ├─ Calculate Cube Loss (optional)
-│   └─ Update Latent
-        ↓
-Denoised Latent (256×128×4)
-        ↓
-VAE Decode
-        ↓
-Equirectangular Image (2048×1024×3)
-        ↓
-Edge Blending & Validation
-        ↓
-Final 360° Panorama
+**Purpose**: Create empty latent with enforced 2:1 aspect ratio
+
+**Category**: `DiT360/latent`
+
+**Inputs**:
+```python
+{
+    "required": {
+        "width": ("INT", {
+            "default": 2048,
+            "min": 512,
+            "max": 8192,
+            "step": 16  # FLUX requires 16-pixel alignment
+        }),
+        "batch_size": ("INT", {
+            "default": 1,
+            "min": 1,
+            "max": 4096
+        })
+    }
+}
 ```
 
-### 4.2 Image-to-Panorama Pipeline
-
-```
-Input Image (Any Resolution)
-        ↓
-Resize/Pad to 2:1 Ratio
-        ↓
-VAE Encode to Latent
-        ↓
-Add Noise (Strength-based)
-        ↓
-[Same as Text-to-Panorama from Denoising Loop]
+**Outputs**:
+```python
+RETURN_TYPES = ("LATENT",)
 ```
 
-### 4.3 Inpainting Pipeline
+**Behavior**:
+- Automatically calculates `height = width // 2` (enforces 2:1)
+- Creates latent with shape `(batch, 16, height//16, width//16)` for FLUX
+- Validates dimensions are multiples of 16
+- Initializes with zeros (standard empty latent)
 
+**Example Usage**:
 ```
-Input Image (2048×1024) + Mask
-        ↓
-VAE Encode Image & Mask
-        ↓
-Initialize Latent with Image Latent
-        ↓
-Denoising Loop
-│   ├─ Generate Noise for Masked Regions
-│   ├─ Preserve Unmasked Regions
-│   └─ Apply DiT360 Sampling
-        ↓
-VAE Decode
-        ↓
-Blend with Original (Feathering)
-        ↓
-Final Inpainted Panorama
+Equirect360EmptyLatent
+  width: 2048
+  → Creates latent for 2048×1024 image
+  → Latent shape: (1, 16, 64, 128)
 ```
 
 ---
 
-## 5. Node Specifications
+### 4.2 Equirect360KSampler ⭐
 
-### 5.1 DiT360ModelLoader Node
+**Purpose**: KSampler with circular padding and optional geometric losses
 
-**Purpose**: Load the main DiT360 transformer model
-
-**Inputs**:
-```python
-{
-    "required": {
-        "model_name": (folder_paths.get_filename_list("dit360"),),
-        "precision": (["fp32", "fp16", "bf16", "fp8"], {"default": "fp16"}),
-        "offload_device": (["cuda", "cpu"], {"default": "cpu"})
-    }
-}
-```
-
-**Outputs**:
-```python
-RETURN_TYPES = ("DIT360_MODEL",)
-```
-
-**Functionality**:
-- Locate model file in `ComfyUI/models/dit360/`
-- Load safetensors/checkpoint with specified precision
-- Initialize DiT360 architecture with FLUX.1-dev config
-- Apply circular padding modifications to attention layers
-- Load LoRA weights if present
-- Configure offloading strategy for memory management
-- Return wrapped model object with ComfyUI integration
-
-**Error Handling**:
-- Missing model files → Clear error with download instructions
-- Insufficient VRAM → Suggest lower precision or offloading
-- Corrupt model files → Validate checksums, suggest re-download
-
-### 5.2 DiT360TextEncoderLoader Node
-
-**Purpose**: Load text encoding models (T5/CLIP)
+**Category**: `DiT360/sampling`
 
 **Inputs**:
 ```python
 {
     "required": {
-        "encoder_name": (folder_paths.get_filename_list("text_encoders"),),
-        "precision": (["fp32", "fp16"], {"default": "fp16"}),
-        "max_length": ("INT", {"default": 512, "min": 77, "max": 1024})
-    }
-}
-```
-
-**Outputs**:
-```python
-RETURN_TYPES = ("TEXT_ENCODER",)
-```
-
-**Functionality**:
-- Load T5-XXL or CLIP text encoder
-- Configure tokenizer with max_length
-- Handle both Hugging Face and local models
-- Apply precision conversion
-- Enable gradient checkpointing for memory efficiency
-
-### 5.3 DiT360VAELoader Node
-
-**Purpose**: Load VAE for latent encoding/decoding
-
-**Inputs**:
-```python
-{
-    "required": {
-        "vae_name": (folder_paths.get_filename_list("vae"),),
-        "precision": (["fp32", "fp16"], {"default": "fp16"})
-    }
-}
-```
-
-**Outputs**:
-```python
-RETURN_TYPES = ("VAE",)
-```
-
-**Functionality**:
-- Load FLUX.1-dev compatible VAE
-- Configure 8x downscale factor (matches latent dimensions)
-- Enable tiling for large panoramas (>4096px width)
-- Apply precision conversion
-
-### 5.4 DiT360Sampler Node
-
-**Purpose**: Core panorama generation node
-
-**Inputs**:
-```python
-{
-    "required": {
-        "model": ("DIT360_MODEL",),
-        "text_encoder": ("TEXT_ENCODER",),
-        "vae": ("VAE",),
-        "prompt": ("STRING", {"multiline": True, "default": ""}),
-        "negative_prompt": ("STRING", {"multiline": True, "default": ""}),
-        "width": ("INT", {"default": 2048, "min": 512, "max": 8192, "step": 64}),
-        "height": ("INT", {"default": 1024, "min": 256, "max": 4096, "step": 64}),
-        "steps": ("INT", {"default": 50, "min": 1, "max": 150}),
-        "cfg_scale": ("FLOAT", {"default": 3.0, "min": 0.0, "max": 20.0, "step": 0.1}),
+        "model": ("MODEL",),
         "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-        "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
-    },
-    "optional": {
+        "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
+        "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1}),
+        "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
+        "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
+        "positive": ("CONDITIONING",),
+        "negative": ("CONDITIONING",),
         "latent_image": ("LATENT",),
-        "mask": ("MASK",)
+        "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+        
+        # Circular padding settings
+        "circular_padding": ("INT", {
+            "default": 16,
+            "min": 0,
+            "max": 128,
+            "tooltip": "Padding width for seamless edges (16-32 recommended)"
+        }),
+        
+        # Optional geometric losses
+        "enable_yaw_loss": ("BOOLEAN", {
+            "default": False,
+            "tooltip": "Enable rotational consistency (slower, higher quality)"
+        }),
+        "yaw_loss_weight": ("FLOAT", {
+            "default": 0.1,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "tooltip": "Yaw loss strength (0.05-0.2 recommended)"
+        }),
+        "enable_cube_loss": ("BOOLEAN", {
+            "default": False,
+            "tooltip": "Enable pole distortion reduction (slower)"
+        }),
+        "cube_loss_weight": ("FLOAT", {
+            "default": 0.1,
+            "min": 0.0,
+            "max": 1.0,
+            "step": 0.01,
+            "tooltip": "Cube loss strength (0.05-0.2 recommended)"
+        })
     }
 }
 ```
 
 **Outputs**:
 ```python
-RETURN_TYPES = ("LATENT", "IMAGE")
-RETURN_NAMES = ("latent", "image")
+RETURN_TYPES = ("LATENT",)
 ```
-
-**Functionality**:
-1. **Validate aspect ratio** (enforce 2:1 or warn)
-2. **Encode prompts** using text encoder
-3. **Initialize latents**:
-   - If latent_image provided: use as starting point
-   - Else: generate random noise with seed
-4. **Sampling loop** (50 steps default):
-   - Apply circular padding to latent edges
-   - Forward pass through DiT360 transformer
-   - Calculate noise prediction with CFG
-   - Update latent using flow matching scheduler
-   - Report progress via ComfyUI progress bar
-5. **VAE decode** latent to image
-6. **Apply edge blending** for seamless wraparound
-7. **Return** both latent and decoded image
 
 **Key Implementation Details**:
+
+**Circular Padding Application**:
 ```python
-# Circular padding implementation
-def apply_circular_padding(latent, padding=10):
-    """Apply circular padding for seamless panorama edges"""
-    left_edge = latent[:, :, :, :padding]
-    right_edge = latent[:, :, :, -padding:]
+def apply_circular_padding(latent: torch.Tensor, padding: int) -> torch.Tensor:
+    """
+    Apply circular padding to latent for seamless wraparound
     
-    # Concatenate for wraparound
-    padded = torch.cat([right_edge, latent, left_edge], dim=3)
+    Args:
+        latent: (B, C, H, W) tensor
+        padding: Padding width in pixels
+    
+    Returns:
+        Padded latent (B, C, H, W+2*padding)
+    """
+    if padding <= 0:
+        return latent
+    
+    # Extract left and right edges
+    left_edge = latent[:, :, :, -padding:]  # Rightmost columns
+    right_edge = latent[:, :, :, :padding]  # Leftmost columns
+    
+    # Concatenate: [right_edge][latent][left_edge]
+    padded = torch.cat([left_edge, latent, right_edge], dim=3)
+    
     return padded
 
-# Yaw loss calculation (optional)
-def calculate_yaw_loss(latent, model, shift_amount=512):
-    """Ensure rotational consistency"""
-    shifted = torch.roll(latent, shifts=shift_amount, dims=3)
-    loss = F.mse_loss(model(latent), model(shifted))
-    return loss
-
-# Cube loss calculation (optional)
-def calculate_cube_loss(latent, model):
-    """Multi-scale distortion awareness"""
-    # Project to cubemap faces
-    cubemap = equirect_to_cubemap(latent)
-    # Calculate consistency across faces
-    face_losses = []
-    for i in range(6):
-        for j in range(i+1, 6):
-            if adjacent_faces(i, j):
-                loss = edge_consistency_loss(cubemap[i], cubemap[j])
-                face_losses.append(loss)
-    return sum(face_losses) / len(face_losses)
+def remove_circular_padding(latent: torch.Tensor, padding: int) -> torch.Tensor:
+    """Remove circular padding after processing"""
+    if padding <= 0:
+        return latent
+    return latent[:, :, :, padding:-padding]
 ```
 
-### 5.5 DiT360SamplerAdvanced Node
-
-**Purpose**: Advanced sampler with geometric loss options
-
-**Additional Inputs** (extends DiT360Sampler):
+**Sampling Loop Integration**:
 ```python
-{
-    "optional": {
-        "enable_yaw_loss": ("BOOLEAN", {"default": False}),
-        "yaw_loss_weight": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0}),
-        "enable_cube_loss": ("BOOLEAN", {"default": False}),
-        "cube_loss_weight": ("FLOAT", {"default": 0.1, "min": 0.0, "max": 1.0}),
-        "circular_padding_width": ("INT", {"default": 10, "min": 0, "max": 100})
-    }
-}
+def sample_with_circular_padding(
+    model, latent, positive, negative, steps, cfg, 
+    sampler_name, scheduler, seed, denoise,
+    circular_padding=16,
+    enable_yaw_loss=False, yaw_loss_weight=0.1,
+    enable_cube_loss=False, cube_loss_weight=0.1
+):
+    """
+    Modified sampling loop with circular padding
+    
+    Key differences from standard KSampler:
+    1. Applies circular padding before each model call
+    2. Removes padding from noise prediction
+    3. Optionally applies geometric losses
+    """
+    
+    # Initialize sampler (use ComfyUI's sampler factory)
+    sampler = comfy.samplers.KSampler(
+        model, steps, device, sampler_name, scheduler, 
+        denoise, model_options={}
+    )
+    
+    # Custom callback to apply circular padding
+    def circular_padding_callback(step, x0, x, total_steps):
+        """Called before each model forward pass"""
+        
+        # Apply circular padding
+        x_padded = apply_circular_padding(x, circular_padding)
+        
+        # Get noise prediction
+        noise_pred = model(x_padded, ...)
+        
+        # Remove padding from prediction
+        noise_pred = remove_circular_padding(noise_pred, circular_padding)
+        
+        # Optional: Apply yaw loss
+        if enable_yaw_loss and step % 5 == 0:  # Every 5 steps to save time
+            yaw_grad = compute_yaw_loss(x, model, circular_padding)
+            noise_pred = noise_pred + yaw_loss_weight * yaw_grad
+        
+        # Optional: Apply cube loss
+        if enable_cube_loss and step % 5 == 0:
+            cube_grad = compute_cube_loss(x, model)
+            noise_pred = noise_pred + cube_loss_weight * cube_grad
+        
+        return noise_pred
+    
+    # Run sampling with callback
+    samples = sampler.sample(
+        latent, positive, negative, seed,
+        callback=circular_padding_callback
+    )
+    
+    return samples
 ```
 
-**Functionality**:
-- All functionality of DiT360Sampler
-- Optional yaw loss for enhanced rotational consistency
-- Optional cube loss for improved pole handling
-- Configurable circular padding width
-- Gradient-based optimization when losses enabled
+**Yaw Loss Implementation** (Optional):
+```python
+def compute_yaw_loss(
+    latent: torch.Tensor,
+    model: torch.nn.Module,
+    circular_padding: int,
+    shift_amount: int = None
+) -> torch.Tensor:
+    """
+    Compute yaw loss for rotational consistency
+    
+    Yaw loss ensures the panorama looks consistent when rotated
+    horizontally. We generate predictions for the original and 
+    horizontally-shifted versions and minimize their difference.
+    
+    Args:
+        latent: Current latent (B, C, H, W)
+        model: Diffusion model
+        circular_padding: Padding width for model calls
+        shift_amount: How far to shift (default: width // 4)
+    
+    Returns:
+        Gradient to apply to latent
+    """
+    if shift_amount is None:
+        shift_amount = latent.shape[3] // 4
+    
+    # Shift latent horizontally (circular shift)
+    latent_shifted = torch.roll(latent, shifts=shift_amount, dims=3)
+    
+    # Get predictions for both
+    with torch.no_grad():
+        # Pad and predict original
+        latent_padded = apply_circular_padding(latent, circular_padding)
+        pred_original = model(latent_padded, ...)
+        pred_original = remove_circular_padding(pred_original, circular_padding)
+        
+        # Pad and predict shifted
+        latent_shifted_padded = apply_circular_padding(latent_shifted, circular_padding)
+        pred_shifted = model(latent_shifted_padded, ...)
+        pred_shifted = remove_circular_padding(pred_shifted, circular_padding)
+    
+    # Shift prediction back to align
+    pred_shifted_aligned = torch.roll(pred_shifted, shifts=-shift_amount, dims=3)
+    
+    # Compute difference (this is the loss gradient)
+    yaw_gradient = pred_original - pred_shifted_aligned
+    
+    return yaw_gradient
+```
 
-### 5.6 Equirect360Validator Node
+**Cube Loss Implementation** (Optional):
+```python
+def compute_cube_loss(
+    latent: torch.Tensor,
+    model: torch.nn.Module
+) -> torch.Tensor:
+    """
+    Compute cube loss for pole distortion reduction
+    
+    Cube loss projects the latent to cubemap faces and checks
+    consistency at face boundaries. This reduces distortion
+    near poles (top/bottom of panorama).
+    
+    Note: This is a simplified approximation. Full implementation
+    would require proper equirectangular-to-cubemap projection.
+    
+    Args:
+        latent: Current latent (B, C, H, W)
+        model: Diffusion model
+    
+    Returns:
+        Gradient to apply to latent
+    """
+    B, C, H, W = latent.shape
+    
+    # Sample key regions (poles, equator)
+    top_region = latent[:, :, :H//4, :]      # North pole region
+    bottom_region = latent[:, :, -H//4:, :]  # South pole region
+    equator_region = latent[:, :, H//2-H//8:H//2+H//8, :]  # Equator
+    
+    # Get predictions for each region
+    with torch.no_grad():
+        pred_top = model(top_region, ...)
+        pred_bottom = model(bottom_region, ...)
+        pred_equator = model(equator_region, ...)
+    
+    # Compute consistency losses
+    # Poles should have lower frequency (less detail) than equator
+    top_freq = compute_frequency_content(pred_top)
+    bottom_freq = compute_frequency_content(pred_bottom)
+    equator_freq = compute_frequency_content(pred_equator)
+    
+    # Gradient encourages pole regions to match expected frequency
+    gradient = torch.zeros_like(latent)
+    gradient[:, :, :H//4, :] = (top_freq - equator_freq * 0.5) * pred_top
+    gradient[:, :, -H//4:, :] = (bottom_freq - equator_freq * 0.5) * pred_bottom
+    
+    return gradient
 
-**Purpose**: Validate and fix equirectangular format issues
+def compute_frequency_content(tensor: torch.Tensor) -> torch.Tensor:
+    """Compute frequency content using FFT"""
+    fft = torch.fft.fft2(tensor)
+    magnitude = torch.abs(fft)
+    return magnitude.mean()
+```
+
+**Performance Notes**:
+- **Circular padding**: ~5% overhead (negligible)
+- **Yaw loss**: ~2-3x slower (extra model forward pass)
+- **Cube loss**: ~1.5-2x slower (partial forward passes)
+- **Both losses**: ~4-5x slower total
+
+**Recommendations**:
+- Default: `circular_padding=16`, losses disabled (fast, good quality)
+- Balanced: `circular_padding=24`, `enable_yaw_loss=True, weight=0.1` (2x slower, better quality)
+- Maximum quality: Both losses enabled at weight 0.1-0.2 (5x slower, best quality)
+
+---
+
+### 4.3 Equirect360VAEDecode
+
+**Purpose**: VAE decode with circular padding for smooth edges
+
+**Category**: `DiT360/vae`
 
 **Inputs**:
 ```python
 {
     "required": {
-        "image": ("IMAGE",),
-        "enforce_ratio": ("BOOLEAN", {"default": True}),
-        "fix_ratio": (["crop", "pad", "stretch", "none"], {"default": "pad"}),
-        "target_width": ("INT", {"default": 2048, "min": 512, "max": 8192, "step": 64})
+        "samples": ("LATENT",),
+        "vae": ("VAE",),
+        "circular_padding": ("INT", {
+            "default": 16,
+            "min": 0,
+            "max": 128,
+            "tooltip": "Padding for VAE decode (16 recommended)"
+        })
     }
 }
 ```
@@ -441,27 +524,75 @@ def calculate_cube_loss(latent, model):
 RETURN_TYPES = ("IMAGE",)
 ```
 
-**Functionality**:
-- Check if image is 2:1 aspect ratio
-- If not 2:1 and enforce_ratio=True:
-  - **Crop**: Center crop to 2:1
-  - **Pad**: Add black bars to reach 2:1
-  - **Stretch**: Resize to 2:1 (distorts content)
-- Resize to target_width while maintaining 2:1
-- Validate image range [0, 1] for ComfyUI compatibility
-- Return validated image
+**Implementation**:
+```python
+def vae_decode_with_circular_padding(
+    vae: torch.nn.Module,
+    latent: torch.Tensor,
+    circular_padding: int = 16
+) -> torch.Tensor:
+    """
+    VAE decode with circular padding for smooth edges
+    
+    Why this helps: VAE upsamples latent 16x. Circular padding
+    ensures the upsampling respects wraparound at edges.
+    
+    Args:
+        vae: VAE decoder
+        latent: Latent tensor (B, C, H, W)
+        circular_padding: Padding width in latent space
+    
+    Returns:
+        Decoded image (B, H*16, W*16, 3) in ComfyUI format
+    """
+    
+    if circular_padding > 0:
+        # Apply padding in latent space
+        latent_padded = apply_circular_padding(latent, circular_padding)
+        
+        # Decode with padding
+        image_padded = vae.decode(latent_padded)
+        
+        # Remove padding in image space (16x upscale factor)
+        padding_pixels = circular_padding * 16
+        image = remove_circular_padding(image_padded, padding_pixels)
+    else:
+        # Standard decode without padding
+        image = vae.decode(latent)
+    
+    # Convert to ComfyUI format if needed
+    # FLUX VAE outputs (B, C, H, W), ComfyUI expects (B, H, W, C)
+    if image.shape[1] == 3:  # (B, 3, H, W)
+        image = image.permute(0, 2, 3, 1)  # → (B, H, W, 3)
+    
+    return image
+```
 
-### 5.7 Equirect360EdgeBlender Node
+**Performance**: ~5% overhead (negligible)
 
-**Purpose**: Apply seamless edge blending for wraparound continuity
+---
+
+### 4.4 Equirect360EdgeBlender
+
+**Purpose**: Post-processing edge blending for perfect wraparound
+
+**Category**: `DiT360/post_process`
 
 **Inputs**:
 ```python
 {
     "required": {
         "image": ("IMAGE",),
-        "blend_width": ("INT", {"default": 10, "min": 1, "max": 100}),
-        "blend_mode": (["linear", "cosine", "smooth"], {"default": "cosine"})
+        "blend_width": ("INT", {
+            "default": 10,
+            "min": 0,
+            "max": 200,
+            "tooltip": "Width of blend region in pixels"
+        }),
+        "blend_mode": (["cosine", "linear", "smoothstep"], {
+            "default": "cosine",
+            "tooltip": "Blending curve shape"
+        })
     }
 }
 ```
@@ -471,27 +602,60 @@ RETURN_TYPES = ("IMAGE",)
 RETURN_TYPES = ("IMAGE",)
 ```
 
-**Functionality**:
+**Implementation**:
 ```python
-def blend_edges(image, blend_width, mode="cosine"):
-    """Blend left and right edges for seamless wraparound"""
+def blend_edges(
+    image: torch.Tensor,
+    blend_width: int = 10,
+    blend_mode: str = "cosine"
+) -> torch.Tensor:
+    """
+    Blend left and right edges for seamless wraparound
+    
+    This is the final polish step. Even with circular padding,
+    there can be subtle discontinuities at the edge. This blends
+    the leftmost and rightmost pixels to ensure perfect continuity.
+    
+    Args:
+        image: (B, H, W, C) image in ComfyUI format
+        blend_width: Width of blend region
+        blend_mode: Blending curve
+    
+    Returns:
+        Image with blended edges
+    """
+    if blend_width <= 0:
+        return image
+    
     B, H, W, C = image.shape
     
+    # Extract edges
     left_edge = image[:, :, :blend_width, :]
     right_edge = image[:, :, -blend_width:, :]
     
-    if mode == "linear":
-        weights = torch.linspace(0, 1, blend_width)
-    elif mode == "cosine":
-        weights = (1 - torch.cos(torch.linspace(0, math.pi, blend_width))) / 2
-    elif mode == "smooth":
-        weights = torch.linspace(0, 1, blend_width) ** 2
+    # Create blend weights based on mode
+    if blend_mode == "cosine":
+        # Smooth cosine curve: 0 → 1
+        t = torch.linspace(0, math.pi, blend_width, device=image.device)
+        weights = (1 - torch.cos(t)) / 2
+    elif blend_mode == "linear":
+        # Linear ramp: 0 → 1
+        weights = torch.linspace(0, 1, blend_width, device=image.device)
+    elif blend_mode == "smoothstep":
+        # Smoothstep: 0 → 1 with ease in/out
+        t = torch.linspace(0, 1, blend_width, device=image.device)
+        weights = t * t * (3 - 2 * t)
+    else:
+        weights = torch.linspace(0, 1, blend_width, device=image.device)
     
-    weights = weights.view(1, 1, -1, 1).to(image.device)
+    # Reshape for broadcasting: (1, 1, blend_width, 1)
+    weights = weights.view(1, 1, -1, 1)
     
+    # Blend: left transitions from right edge, right transitions to left edge
     blended_left = left_edge * (1 - weights) + right_edge * weights
     blended_right = right_edge * (1 - weights) + left_edge * weights
     
+    # Apply blending
     result = image.clone()
     result[:, :, :blend_width, :] = blended_left
     result[:, :, -blend_width:, :] = blended_right
@@ -499,788 +663,571 @@ def blend_edges(image, blend_width, mode="cosine"):
     return result
 ```
 
-### 5.8 Equirect360Preview Node
+**Visual Explanation**:
+```
+Before blending:
+Left edge:  [A A A A A]        Right edge: [B B B B B]
+                                            ↓
+After blending (blend_width=5):
+Left edge:  [B B→A A A]        Right edge: [B A→A A A]
+              ↑                            ↑
+        Smooth transition            Smooth transition
+```
+
+**Performance**: <1% overhead (very fast)
+
+---
+
+### 4.5 Equirect360Viewer
 
 **Purpose**: Interactive 360° panorama viewer
+
+**Category**: `DiT360/preview`
 
 **Inputs**:
 ```python
 {
     "required": {
         "images": ("IMAGE",),
-        "max_width": ("INT", {"default": 4096, "min": -1, "max": 8192})
+        "max_resolution": ("INT", {
+            "default": 4096,
+            "min": 512,
+            "max": 8192,
+            "tooltip": "Max width for preview (lower = faster loading)"
+        })
     }
 }
 ```
 
 **Outputs**:
 ```python
-RETURN_TYPES = ()
+RETURN_TYPES = ()  # Preview node, no output
 OUTPUT_NODE = True
 ```
 
-**Functionality**:
-- Convert ComfyUI IMAGE tensor to base64 JPEG
-- Downsample to max_width for web viewing
-- Return UI data with embedded viewer
-- JavaScript viewer uses Three.js for 360° rendering
-- Mouse drag for rotation, scroll for zoom
-- Fullscreen mode support
+**Implementation Overview**:
 
-**Frontend Implementation** (`web/js/equirect360_preview.js`):
+The viewer consists of:
+1. **Backend (Python)**: Converts image to base64, returns UI data
+2. **Frontend (JavaScript)**: Three.js viewer embedded in ComfyUI
+
+**Backend Implementation**:
+```python
+def preview_360(
+    images: torch.Tensor,
+    max_resolution: int = 4096
+) -> dict:
+    """
+    Prepare panorama for 360° preview
+    
+    Args:
+        images: (B, H, W, C) tensor
+        max_resolution: Max width for preview
+    
+    Returns:
+        UI data dict for ComfyUI frontend
+    """
+    import base64
+    from io import BytesIO
+    from PIL import Image
+    
+    results = []
+    
+    for image in images:
+        # Convert to PIL
+        img_np = (image.cpu().numpy() * 255).astype(np.uint8)
+        img_pil = Image.fromarray(img_np)
+        
+        # Resize if needed
+        W, H = img_pil.size
+        if W > max_resolution:
+            new_W = max_resolution
+            new_H = new_W // 2
+            img_pil = img_pil.resize((new_W, new_H), Image.LANCZOS)
+        
+        # Convert to base64 JPEG
+        buffer = BytesIO()
+        img_pil.save(buffer, format="JPEG", quality=95)
+        img_base64 = base64.b64encode(buffer.getvalue()).decode()
+        
+        results.append({
+            "type": "equirect360",
+            "image_data": f"data:image/jpeg;base64,{img_base64}",
+            "width": img_pil.size[0],
+            "height": img_pil.size[1]
+        })
+    
+    return {"ui": {"images": results}}
+```
+
+**Frontend Implementation** (`web/js/equirect360_viewer.js`):
 ```javascript
 import { app } from "../../scripts/app.js";
+import { api } from "../../scripts/api.js";
 
+// Register extension
 app.registerExtension({
-    name: "ComfyUI.DiT360.Equirect360Preview",
+    name: "ComfyUI.DiT360.Equirect360Viewer",
+    
     async nodeCreated(node) {
-        if (node.comfyClass === "Equirect360Preview") {
-            // Create Three.js scene for 360 viewing
-            node.addWidget("button", "View 360°", "view", () => {
-                createPanoramaViewer(node.imageData);
+        if (node.comfyClass === "Equirect360Viewer") {
+            // Add custom widget for 360° viewing
+            node.addCustomWidget({
+                name: "360_viewer",
+                type: "360_viewer",
+                
+                draw: function(ctx, node, width, y) {
+                    // Draw "View 360°" button
+                    ctx.fillStyle = "#4CAF50";
+                    ctx.fillRect(10, y, width - 20, 30);
+                    ctx.fillStyle = "#FFFFFF";
+                    ctx.font = "14px Arial";
+                    ctx.fillText("🔄 View 360°", width/2 - 40, y + 20);
+                },
+                
+                mouse: function(event, pos, node) {
+                    if (event.type === "click" && node.images?.[0]) {
+                        // Open 360° viewer modal
+                        open360Viewer(node.images[0].image_data);
+                    }
+                }
             });
         }
     }
 });
 
-function createPanoramaViewer(imageData) {
-    // Three.js implementation
-    const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
-    const renderer = new THREE.WebGLRenderer();
+function open360Viewer(imageData) {
+    // Create modal overlay
+    const modal = document.createElement("div");
+    modal.style.cssText = `
+        position: fixed;
+        top: 0; left: 0;
+        width: 100vw; height: 100vh;
+        background: rgba(0,0,0,0.9);
+        z-index: 10000;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    `;
     
-    // Create sphere geometry with panorama texture
+    // Create canvas for Three.js
+    const canvas = document.createElement("canvas");
+    canvas.width = window.innerWidth * 0.9;
+    canvas.height = window.innerHeight * 0.9;
+    modal.appendChild(canvas);
+    
+    // Add close button
+    const closeBtn = document.createElement("button");
+    closeBtn.textContent = "✕ Close";
+    closeBtn.style.cssText = `
+        position: absolute;
+        top: 20px; right: 20px;
+        padding: 10px 20px;
+        background: #fff;
+        border: none;
+        cursor: pointer;
+    `;
+    closeBtn.onclick = () => {
+        document.body.removeChild(modal);
+        renderer.dispose();
+    };
+    modal.appendChild(closeBtn);
+    
+    document.body.appendChild(modal);
+    
+    // Initialize Three.js scene
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(
+        75, canvas.width / canvas.height, 0.1, 1000
+    );
+    const renderer = new THREE.WebGLRenderer({ canvas });
+    
+    // Create sphere for panorama
     const geometry = new THREE.SphereGeometry(500, 60, 40);
     geometry.scale(-1, 1, 1); // Invert for inside viewing
     
-    const texture = new THREE.TextureLoader().load(imageData);
+    // Load texture
+    const textureLoader = new THREE.TextureLoader();
+    const texture = textureLoader.load(imageData);
+    
     const material = new THREE.MeshBasicMaterial({ map: texture });
     const sphere = new THREE.Mesh(geometry, material);
-    
     scene.add(sphere);
+    
     camera.position.set(0, 0, 0);
     
-    // Mouse controls for rotation
-    // ... (implementation details)
+    // Mouse controls
+    let isDragging = false;
+    let previousMousePosition = { x: 0, y: 0 };
+    let rotation = { x: 0, y: 0 };
+    
+    canvas.addEventListener("mousedown", (e) => {
+        isDragging = true;
+        previousMousePosition = { x: e.clientX, y: e.clientY };
+    });
+    
+    canvas.addEventListener("mousemove", (e) => {
+        if (isDragging) {
+            const deltaX = e.clientX - previousMousePosition.x;
+            const deltaY = e.clientY - previousMousePosition.y;
+            
+            rotation.y += deltaX * 0.005;
+            rotation.x += deltaY * 0.005;
+            
+            // Clamp vertical rotation
+            rotation.x = Math.max(-Math.PI/2, Math.min(Math.PI/2, rotation.x));
+            
+            previousMousePosition = { x: e.clientX, y: e.clientY };
+        }
+    });
+    
+    canvas.addEventListener("mouseup", () => {
+        isDragging = false;
+    });
+    
+    // Scroll for zoom (FOV adjustment)
+    canvas.addEventListener("wheel", (e) => {
+        e.preventDefault();
+        camera.fov += e.deltaY * 0.05;
+        camera.fov = Math.max(30, Math.min(120, camera.fov));
+        camera.updateProjectionMatrix();
+    });
+    
+    // Render loop
+    function animate() {
+        requestAnimationFrame(animate);
+        
+        // Apply rotation to camera
+        camera.rotation.order = "YXZ";
+        camera.rotation.y = rotation.y;
+        camera.rotation.x = rotation.x;
+        
+        renderer.render(scene, camera);
+    }
+    
+    animate();
 }
 ```
 
----
-
-## 6. File Structure
-
-```
-ComfyUI/
-└── custom_nodes/
-    └── ComfyUI-DiT360/
-        ├── __init__.py                 # Entry point & node registration
-        ├── nodes.py                    # Core node implementations
-        ├── requirements.txt            # Python dependencies
-        ├── install.py                  # Custom installation script
-        ├── README.md                   # User documentation
-        ├── LICENSE                     # Apache 2.0 license
-        │
-        ├── dit360/                     # Core DiT360 implementation
-        │   ├── __init__.py
-        │   ├── model.py                # DiT360 model architecture
-        │   ├── sampler.py              # Sampling algorithms
-        │   ├── conditioning.py         # Text encoding & conditioning
-        │   ├── losses.py               # Yaw loss, cube loss implementations
-        │   └── utils.py                # Utility functions
-        │
-        ├── utils/                      # Utility modules
-        │   ├── __init__.py
-        │   ├── equirect.py             # Equirectangular utilities
-        │   ├── padding.py              # Circular padding implementations
-        │   ├── validation.py           # Input validation
-        │   └── paths.py                # Windows path handling
-        │
-        ├── web/                        # Frontend resources
-        │   └── js/
-        │       ├── equirect360_preview.js  # 360° viewer
-        │       └── node_widgets.js         # Custom node widgets
-        │
-        ├── examples/                   # Example workflows
-        │   ├── text_to_panorama.json
-        │   ├── image_to_panorama.json
-        │   ├── inpainting.json
-        │   └── advanced_workflow.json
-        │
-        ├── tests/                      # Unit tests
-        │   ├── __init__.py
-        │   ├── test_nodes.py
-        │   ├── test_equirect.py
-        │   ├── test_padding.py
-        │   └── test_windows_paths.py
-        │
-        └── docs/                       # Documentation
-            ├── installation.md
-            ├── usage.md
-            ├── troubleshooting.md
-            └── api_reference.md
-```
+**Features**:
+- Mouse drag to rotate view
+- Scroll to zoom (adjust FOV)
+- Fullscreen-like modal
+- Works in ComfyUI web interface
+- No external dependencies (Three.js loaded from CDN)
 
 ---
 
-## 7. Implementation Phases
+## 5. Implementation Phases
 
-### Phase 1: Foundation Setup (Week 1)
+### Phase 1: Basic Structure (Week 1)
 **Deliverables**:
-- Project structure created
-- `__init__.py` with NODE_CLASS_MAPPINGS
-- Basic requirements.txt
-- Model folder registration with folder_paths
-- Empty node classes that load in ComfyUI
+- Project structure with 5 node files
+- `__init__.py` with node registration
+- `requirements.txt` (minimal)
+- Basic README
 
 **Validation**:
-- ComfyUI loads without errors
-- Nodes appear in node menu under "DiT360" category
-- No dependency conflicts with fresh ComfyUI install
+- Nodes load in ComfyUI without errors
+- Appear in "DiT360" category
 
-### Phase 2: Model Loading Infrastructure (Week 1-2)
+---
+
+### Phase 2: Aspect Ratio Helper (Week 1)
 **Deliverables**:
-- DiT360ModelLoader implementation
-- DiT360TextEncoderLoader implementation
-- DiT360VAELoader implementation
-- Hugging Face Hub integration
-- Automatic model download
-- Model caching system
+- `Equirect360EmptyLatent` node
+- 2:1 ratio enforcement
+- Input validation
 
 **Validation**:
-- Models download automatically when missing
-- Models load without errors
-- Memory usage stays within expected bounds
-- Device placement (GPU/CPU) works correctly
-- Progress bars show during loading
+- Creates correct latent dimensions
+- Rejects invalid dimensions
+- Works with standard FLUX workflow
 
-### Phase 3: Core Generation Pipeline (Week 2-3)
+---
+
+### Phase 3: Circular Padding Implementation (Week 1-2)
 **Deliverables**:
-- DiT360Sampler node implementation
-- Circular padding implementation
-- Basic sampling loop (no geometric losses yet)
-- VAE encode/decode integration
-- Prompt encoding pipeline
-- Progress reporting
+- Core circular padding functions
+- `Equirect360KSampler` basic version (no losses)
+- Integration with ComfyUI sampler system
 
 **Validation**:
-- Can generate 2048×1024 panoramas
-- Generation completes without OOM errors
-- Images have correct tensor shape [B, H, W, C]
-- Basic prompt following works
-- Seed produces reproducible results
+- Panoramas have seamless left/right edges
+- Generation time similar to standard KSampler
+- Works with all sampler types (euler, dpmpp, etc.)
 
-### Phase 4: Geometric Features (Week 3-4)
+---
+
+### Phase 4: VAE Decode Enhancement (Week 2)
 **Deliverables**:
-- DiT360SamplerAdvanced node
-- Yaw loss implementation
-- Cube loss implementation
-- Configurable circular padding
-- Edge blending utilities
+- `Equirect360VAEDecode` node
+- Circular padding during VAE decode
 
 **Validation**:
-- Panoramas have seamless wraparound
-- Rotational consistency improved with yaw loss
-- Pole distortion reduced with cube loss
-- Advanced sampler produces higher quality than basic
+- Improved edge quality vs standard VAE decode
+- No artifacts at boundaries
+- <10% performance overhead
 
-### Phase 5: Format Validation & Utilities (Week 4)
+---
+
+### Phase 5: Edge Blending Post-Process (Week 2)
 **Deliverables**:
-- Equirect360Validator node
-- Equirect360EdgeBlender node
-- Aspect ratio fixing (crop/pad/stretch)
-- Format conversion utilities
-- Image range validation
+- `Equirect360EdgeBlender` node
+- Multiple blend modes (cosine, linear, smoothstep)
 
 **Validation**:
-- Non-2:1 images correctly fixed
-- Edge blending produces seamless results
-- Validation catches common format errors
-- Clear error messages for invalid inputs
+- Perfect wraparound in final image
+- Check with `torch.allclose(left_edge, right_edge)`
+- Visual inspection: no visible seam
 
-### Phase 6: Interactive Viewing (Week 5)
+---
+
+### Phase 6: Interactive Viewer (Week 3)
 **Deliverables**:
-- Equirect360Preview node
-- Three.js 360° viewer
-- Frontend JavaScript integration
-- Fullscreen mode
-- Export functionality
+- `Equirect360Viewer` backend node
+- Three.js frontend viewer
+- Modal interface in ComfyUI
 
 **Validation**:
 - Viewer loads panoramas correctly
 - Mouse controls work smoothly
 - Works in ComfyUI web interface
-- Fullscreen mode functional
-- Export produces valid panorama files
-
-### Phase 7: Windows Compatibility (Week 5-6)
-**Deliverables**:
-- Path handling with pathlib
-- Case-insensitive file search
-- Long path support validation
-- File locking prevention
-- Windows-specific install.py
-- CUDA installation validation
-
-**Validation**:
-- All tests pass on Windows 10/11
-- Works with portable ComfyUI
-- Paths with spaces and special chars work
-- No file locking issues
-- CUDA properly detected
-
-### Phase 8: Advanced Features (Week 6-7)
-**Deliverables**:
-- Inpainting support
-- Outpainting support
-- Image-to-panorama pipeline
-- LoRA loading
-- Multiple precision support (fp8, bf16)
-- Model offloading configuration
-
-**Validation**:
-- Inpainting produces coherent results
-- Outpainting extends panoramas naturally
-- Img2img maintains panoramic format
-- LoRA weights apply correctly
-- FP8 reduces VRAM as expected
-
-### Phase 9: Testing & Documentation (Week 7-8)
-**Deliverables**:
-- Comprehensive test suite
-- Unit tests for all modules
-- Integration tests for workflows
-- Windows-specific tests
-- README.md with examples
-- Troubleshooting guide
-- API documentation
-- Example workflows
-
-**Validation**:
-- All tests pass
-- Documentation covers common issues
-- Example workflows work out-of-box
-- Clear installation instructions
-- Known limitations documented
-
-### Phase 10: Release & Distribution (Week 8)
-**Deliverables**:
-- GitHub repository setup
-- LICENSE file (Apache 2.0)
-- CHANGELOG.md
-- ComfyUI Manager integration
-- Release builds
-- Issue templates
-- Contributing guidelines
-
-**Validation**:
-- Installs via ComfyUI Manager
-- GitHub releases work
-- Issue tracker configured
-- License compliance verified
+- Proper texture wrapping (no seam in viewer)
 
 ---
 
-## 8. Testing Strategy
+### Phase 7: Geometric Losses (Week 3-4)
+**Deliverables**:
+- Yaw loss implementation in KSampler
+- Cube loss implementation in KSampler
+- Optional parameters (disabled by default)
 
-### 8.1 Unit Tests
+**Validation**:
+- Yaw loss improves rotational consistency
+- Cube loss reduces pole distortion
+- Performance impact: 2-3x slower when enabled
+- Quality improvement visible in A/B testing
 
-**Module: utils/equirect.py**
-```python
-def test_validate_aspect_ratio():
-    """Test 2:1 ratio validation"""
-    assert validate_aspect_ratio(2048, 1024) == True
-    assert validate_aspect_ratio(2000, 1000) == True
-    assert validate_aspect_ratio(1920, 1080) == False
+---
 
-def test_blend_edges():
-    """Test edge blending produces seamless wraparound"""
-    image = torch.rand(1, 1024, 2048, 3)
-    blended = blend_edges(image, blend_width=10)
-    
-    # Check left and right edges match
-    left = blended[:, :, :10, :]
-    right = blended[:, :, -10:, :]
-    assert torch.allclose(left, right, atol=1e-4)
+### Phase 8: Testing & Documentation (Week 4)
+**Deliverables**:
+- Unit tests for all nodes
+- Example workflows
+- Comprehensive README
+- Troubleshooting guide
 
-def test_equirect_to_cubemap():
-    """Test equirectangular to cubemap conversion"""
-    equirect = torch.rand(1, 1024, 2048, 3)
-    cubemap = equirect_to_cubemap(equirect, face_size=512)
-    
-    assert cubemap.shape == (6, 512, 512, 3)
-    assert cubemap.min() >= 0 and cubemap.max() <= 1
-```
+**Validation**:
+- All tests pass on Windows and Linux
+- Example workflows work out-of-box
+- Clear installation instructions
 
-**Module: utils/padding.py**
+---
+
+## 6. Testing Strategy
+
+### 6.1 Unit Tests
+
+**Test: Circular Padding**
 ```python
 def test_circular_padding():
-    """Test circular padding maintains continuity"""
-    latent = torch.rand(1, 4, 128, 256)
+    """Test circular padding creates wraparound continuity"""
+    latent = torch.rand(1, 4, 64, 128)
     padded = apply_circular_padding(latent, padding=10)
     
-    # Check wraparound continuity
+    # Check shape
+    assert padded.shape == (1, 4, 64, 148)
+    
+    # Check left padding matches right edge of original
     assert torch.allclose(
         padded[:, :, :, :10],
         latent[:, :, :, -10:],
         atol=1e-6
     )
+    
+    # Check right padding matches left edge of original
+    assert torch.allclose(
+        padded[:, :, :, -10:],
+        latent[:, :, :, :10],
+        atol=1e-6
+    )
 ```
 
-**Module: dit360/model.py**
+**Test: Edge Blending**
 ```python
-def test_model_loading():
-    """Test DiT360 model loads correctly"""
-    model = load_dit360_model("test_model.safetensors", precision="fp16")
-    assert model is not None
-    assert next(model.parameters()).dtype == torch.float16
-
-def test_model_inference():
-    """Test model produces correct output shapes"""
-    model = load_dit360_model("test_model.safetensors")
-    latent = torch.rand(1, 4, 128, 256)
-    conditioning = torch.rand(1, 77, 768)
+def test_edge_blending():
+    """Test edge blending creates seamless wraparound"""
+    image = torch.rand(1, 1024, 2048, 3)
+    blended = blend_edges(image, blend_width=10)
     
-    output = model(latent, conditioning)
-    assert output.shape == latent.shape
+    # Check left and right edges are similar after blending
+    left_edge = blended[:, :, :10, :]
+    right_edge = blended[:, :, -10:, :]
+    
+    # Should be very close (not identical due to blending)
+    diff = torch.abs(left_edge - right_edge).mean()
+    assert diff < 0.01  # Less than 1% difference
 ```
 
-### 8.2 Integration Tests
-
-**Workflow: Text-to-Panorama**
+**Test: 2:1 Aspect Ratio**
 ```python
-def test_text_to_panorama_workflow():
-    """Test complete text-to-panorama generation"""
-    # Load models
-    model = DiT360ModelLoader.load("dit360_model.safetensors")
-    encoder = DiT360TextEncoderLoader.load("t5_encoder.safetensors")
-    vae = DiT360VAELoader.load("vae.safetensors")
+def test_aspect_ratio_enforcement():
+    """Test Equirect360EmptyLatent enforces 2:1 ratio"""
+    node = Equirect360EmptyLatent()
     
-    # Generate panorama
-    latent, image = DiT360Sampler.generate(
-        model=model,
-        text_encoder=encoder,
-        vae=vae,
-        prompt="A beautiful sunset over the ocean",
-        width=2048,
-        height=1024,
-        steps=50,
-        seed=42
+    # Test valid width
+    latent = node.create_latent(width=2048, batch_size=1)
+    samples = latent["samples"]
+    
+    # Latent is 16x compressed
+    assert samples.shape == (1, 16, 64, 128)  # 1024×2048 image
+    
+    # Height should be exactly half of width
+    assert samples.shape[2] * 2 == samples.shape[3]
+```
+
+### 6.2 Integration Tests
+
+**Test: Full Workflow**
+```python
+def test_full_panorama_workflow():
+    """Test complete workflow from latent to panorama"""
+    
+    # 1. Create empty latent
+    latent_node = Equirect360EmptyLatent()
+    latent = latent_node.create_latent(width=2048, batch_size=1)
+    
+    # 2. Sample (mock model)
+    sampler_node = Equirect360KSampler()
+    samples = sampler_node.sample(
+        model=mock_model,
+        latent_image=latent,
+        steps=10,
+        circular_padding=16
     )
     
-    # Validate output
-    assert image.shape == (1, 1024, 2048, 3)
-    assert image.min() >= 0 and image.max() <= 1
-    assert validate_aspect_ratio(2048, 1024)
+    # 3. Decode
+    vae_node = Equirect360VAEDecode()
+    image = vae_node.decode(samples, mock_vae, circular_padding=16)
     
-    # Check wraparound continuity
-    assert check_edge_continuity(image, threshold=0.05)
+    # 4. Blend edges
+    blender_node = Equirect360EdgeBlender()
+    final_image = blender_node.blend(image, blend_width=10)
+    
+    # Validate final output
+    assert final_image.shape == (1, 1024, 2048, 3)
+    assert final_image.min() >= 0 and final_image.max() <= 1
+    
+    # Check seamlessness
+    left = final_image[:, :, :5, :]
+    right = final_image[:, :, -5:, :]
+    diff = torch.abs(left - right).mean()
+    assert diff < 0.05  # Less than 5% difference
 ```
 
-**Workflow: Inpainting**
-```python
-def test_inpainting_workflow():
-    """Test inpainting workflow"""
-    # Load models and base image
-    base_image = load_test_panorama("test_panorama.png")
-    mask = create_test_mask(width=512, height=512, x=1000, y=400)
-    
-    # Run inpainting
-    result = DiT360Sampler.generate(
-        model=model,
-        vae=vae,
-        prompt="A hot air balloon",
-        latent_image=encode_image(base_image, vae),
-        mask=mask,
-        denoise=0.8
-    )
-    
-    # Validate
-    assert result.shape == base_image.shape
-    assert not torch.allclose(result[:, 400:912, 1000:1512, :], 
-                              base_image[:, 400:912, 1000:1512, :])
-```
+### 6.3 Visual Quality Tests
 
-### 8.3 Windows-Specific Tests
-
-```python
-def test_windows_paths():
-    """Test path handling on Windows"""
-    test_paths = [
-        "C:\\Users\\Test User\\ComfyUI\\models\\dit360",
-        "C:/Users/Test User/ComfyUI/models/dit360",
-        r"C:\Users\Test User\ComfyUI\models\dit360",
-    ]
-    
-    for path in test_paths:
-        p = Path(path)
-        assert p.exists() or not p.exists()  # Should not error
-
-def test_long_paths():
-    """Test handling of long Windows paths"""
-    long_path = "C:\\Users\\TestUser\\ComfyUI\\models\\" + "a" * 240 + "\\model.safetensors"
-    assert len(long_path) > 260
-    
-    # Should handle gracefully
-    try:
-        p = Path(long_path)
-        result = validate_path_length(str(p))
-    except Exception as e:
-        pytest.fail(f"Long path handling failed: {e}")
-
-def test_case_insensitive_search():
-    """Test case-insensitive file finding"""
-    # Create test files
-    test_dir = Path("test_models")
-    test_dir.mkdir(exist_ok=True)
-    (test_dir / "TestModel.safetensors").touch()
-    
-    # Should find with different case
-    result = find_file_case_insensitive(test_dir, "testmodel.safetensors")
-    assert result is not None
-    assert result.name == "TestModel.safetensors"
-```
-
-### 8.4 Performance Tests
-
-```python
-def test_memory_usage():
-    """Test memory stays within expected bounds"""
-    import psutil
-    import gc
-    
-    process = psutil.Process()
-    
-    # Baseline memory
-    gc.collect()
-    torch.cuda.empty_cache()
-    baseline_vram = torch.cuda.memory_allocated()
-    
-    # Load model and generate
-    model = DiT360ModelLoader.load("dit360_model.safetensors", precision="fp16")
-    latent, image = DiT360Sampler.generate(
-        model=model,
-        prompt="Test panorama",
-        steps=20
-    )
-    
-    # Check peak memory
-    peak_vram = torch.cuda.max_memory_allocated()
-    vram_used_gb = (peak_vram - baseline_vram) / (1024**3)
-    
-    assert vram_used_gb < 20, f"VRAM usage {vram_used_gb:.2f}GB exceeds 20GB limit"
-
-def test_generation_speed():
-    """Test generation completes within time limits"""
-    import time
-    
-    start = time.time()
-    latent, image = DiT360Sampler.generate(
-        model=model,
-        prompt="Speed test panorama",
-        width=2048,
-        height=1024,
-        steps=50
-    )
-    duration = time.time() - start
-    
-    assert duration < 180, f"Generation took {duration:.1f}s, exceeds 3min limit"
-```
+**Checklist for Manual Testing**:
+- [ ] Left and right edges align perfectly when wrapped
+- [ ] No visible seam at edge boundary
+- [ ] Top and bottom edges have appropriate distortion (more at poles)
+- [ ] 360° viewer shows seamless rotation
+- [ ] No artifacts or discontinuities
+- [ ] Consistent lighting across wraparound
+- [ ] Prompt is followed throughout panorama
 
 ---
 
-## 9. Error Handling & Validation
+## 7. Known Limitations & Future Work
 
-### 9.1 Common Error Scenarios
-
-**Insufficient VRAM**
-```python
-def handle_oom_error():
-    """Gracefully handle CUDA out of memory errors"""
-    try:
-        latent, image = model.generate(...)
-    except torch.cuda.OutOfMemoryError:
-        torch.cuda.empty_cache()
-        raise RuntimeError(
-            "Insufficient VRAM for generation. Try:\n"
-            "• Lower precision (fp16 → fp8)\n"
-            "• Smaller resolution (2048×1024 → 1024×512)\n"
-            "• Enable model offloading\n"
-            f"Current VRAM: {torch.cuda.memory_allocated()/(1024**3):.1f}GB"
-        )
-```
-
-**Missing Model Files**
-```python
-def check_model_exists(model_name):
-    """Check if model exists, provide download instructions if not"""
-    model_path = folder_paths.get_full_path("dit360", model_name)
-    
-    if not Path(model_path).exists():
-        raise FileNotFoundError(
-            f"Model not found: {model_name}\n\n"
-            f"Download from: https://huggingface.co/Insta360-Research/DiT360-Panorama-Image-Generation\n"
-            f"Place in: {folder_paths.get_folder_paths('dit360')[0]}"
-        )
-```
-
-**Invalid Aspect Ratio**
-```python
-def validate_dimensions(width, height):
-    """Validate panorama dimensions"""
-    ratio = width / height
-    
-    if abs(ratio - 2.0) > 0.01:
-        raise ValueError(
-            f"Invalid aspect ratio: {width}×{height} ({ratio:.2f}:1)\n"
-            f"Equirectangular panoramas must be 2:1 ratio.\n"
-            f"Valid resolutions: 2048×1024, 4096×2048, 1024×512, etc."
-        )
-    
-    if width % 64 != 0 or height % 64 != 0:
-        raise ValueError(
-            f"Dimensions must be multiples of 64\n"
-            f"Got: {width}×{height}\n"
-            f"Try: {(width//64)*64}×{(height//64)*64}"
-        )
-```
-
-**CUDA Not Available**
-```python
-def check_cuda_available():
-    """Check CUDA availability and version"""
-    if not torch.cuda.is_available():
-        raise RuntimeError(
-            "CUDA not available. DiT360 requires NVIDIA GPU with CUDA support.\n"
-            "Install CUDA toolkit: https://developer.nvidia.com/cuda-downloads\n"
-            "Install PyTorch with CUDA: pip install torch --index-url https://download.pytorch.org/whl/cu121"
-        )
-    
-    cuda_version = torch.version.cuda
-    if cuda_version < "11.8":
-        print(f"Warning: CUDA {cuda_version} detected. Recommended: 11.8 or newer")
-```
-
-### 9.2 Input Validation
-
-```python
-def validate_inputs(self, **kwargs):
-    """Validate all inputs before processing"""
-    errors = []
-    
-    # Check dimensions
-    width = kwargs.get("width")
-    height = kwargs.get("height")
-    if width and height:
-        try:
-            validate_dimensions(width, height)
-        except ValueError as e:
-            errors.append(str(e))
-    
-    # Check steps range
-    steps = kwargs.get("steps")
-    if steps and (steps < 1 or steps > 150):
-        errors.append(f"Steps must be 1-150, got {steps}")
-    
-    # Check CFG scale
-    cfg = kwargs.get("cfg_scale")
-    if cfg and (cfg < 0 or cfg > 20):
-        errors.append(f"CFG scale must be 0-20, got {cfg}")
-    
-    # Check prompt length
-    prompt = kwargs.get("prompt", "")
-    if len(prompt) > 1000:
-        errors.append(f"Prompt too long: {len(prompt)} chars (max 1000)")
-    
-    if errors:
-        raise ValueError("Input validation failed:\n" + "\n".join(errors))
-```
-
----
-
-## 10. Windows Compatibility Checklist
-
-### 10.1 Path Handling
-- [ ] All paths use `pathlib.Path` or `os.path.join`
-- [ ] No hardcoded backslash paths (`C:\...`)
-- [ ] Forward slashes used where possible (`C:/...`)
-- [ ] Raw strings for Windows paths (`r"C:\..."`)
-- [ ] Case-insensitive file search implemented
-- [ ] Long path support validated (>260 chars)
-- [ ] Path length validation warnings
-
-### 10.2 File Operations
-- [ ] Context managers for all file operations
-- [ ] Files properly closed after reading
-- [ ] No file locking issues
-- [ ] Temp files cleaned up properly
-- [ ] Safe concurrent file access
-
-### 10.3 Dependencies
-- [ ] Requirements.txt has loose version constraints
-- [ ] No PyTorch reinstallation unless necessary
-- [ ] CUDA version compatibility checked
-- [ ] Visual C++ redistributables documented
-- [ ] Portable Python support tested
-
-### 10.4 Environment
-- [ ] PYTORCH_CUDA_ALLOC_CONF configuration documented
-- [ ] Environment variable handling works
-- [ ] Portable installations supported
-- [ ] Virtual environments supported
-
-### 10.5 Testing
-- [ ] All tests pass on Windows 10
-- [ ] All tests pass on Windows 11
-- [ ] Portable ComfyUI tested
-- [ ] Standard installation tested
-- [ ] Paths with spaces tested
-- [ ] Special characters in paths tested
-
----
-
-## 11. Deployment & Distribution
-
-### 11.1 GitHub Repository Setup
-
-**Repository Structure**:
-```
-ComfyUI-DiT360/
-├── .github/
-│   ├── workflows/
-│   │   ├── tests.yml          # CI/CD tests
-│   │   └── release.yml        # Release automation
-│   ├── ISSUE_TEMPLATE/
-│   │   ├── bug_report.md
-│   │   └── feature_request.md
-│   └── PULL_REQUEST_TEMPLATE.md
-├── [all node pack files]
-├── LICENSE                     # Apache 2.0
-├── README.md
-├── CHANGELOG.md
-└── CONTRIBUTING.md
-```
-
-### 11.2 ComfyUI Manager Integration
-
-**pyproject.toml** (for ComfyUI Manager):
-```toml
-[project]
-name = "ComfyUI-DiT360"
-version = "1.0.0"
-description = "DiT360 panoramic image generation for ComfyUI"
-authors = [{name = "Your Name", email = "your.email@example.com"}]
-license = {text = "Apache-2.0"}
-requires-python = ">=3.9"
-dependencies = [
-    "torch>=2.0.0",
-    "transformers>=4.28.1",
-    "diffusers>=0.25.0",
-    "safetensors>=0.4.2",
-    "accelerate>=0.26.0",
-    "huggingface-hub>=0.20.0",
-]
-
-[project.urls]
-Homepage = "https://github.com/yourusername/ComfyUI-DiT360"
-Repository = "https://github.com/yourusername/ComfyUI-DiT360"
-Issues = "https://github.com/yourusername/ComfyUI-DiT360/issues"
-```
-
-### 11.3 Release Process
-
-1. **Version Bump**: Update version in `__init__.py` and `pyproject.toml`
-2. **Update CHANGELOG.md**: Document all changes
-3. **Run Tests**: Ensure all tests pass on Windows and Linux
-4. **Create Tag**: `git tag -a v1.0.0 -m "Release v1.0.0"`
-5. **Push Tag**: `git push origin v1.0.0`
-6. **GitHub Release**: Create release with binaries and changelog
-7. **Announce**: Post in ComfyUI Discord and Reddit
-
----
-
-## 12. Known Limitations & Future Work
-
-### 12.1 Current Limitations
+### 7.1 Current Limitations
 
 **Performance**:
-- Requires 16-24GB VRAM for inference
-- Generation takes 1-2 minutes for 50 steps
-- Model loading takes 30-60 seconds
-
-**Features**:
-- No multi-batch generation support
-- Limited LoRA compatibility
-- No ControlNet support yet
-- Single precision per session
+- Yaw loss: 2-3x slower (requires extra model forward passes)
+- Cube loss: 1.5-2x slower (additional computations)
+- Limited to single-batch generation (no batch support yet)
 
 **Compatibility**:
-- Tested only on NVIDIA GPUs (no AMD/Intel)
-- Windows 10/11 and Linux only (no macOS)
-- CUDA 11.8+ required
+- Requires FLUX.1-dev (not compatible with SD1.5/SDXL without modifications)
+- Needs 12GB+ VRAM for standard resolution (2048×1024)
+- Windows/Linux only (macOS support untested)
 
-### 12.2 Future Enhancements
+**Features**:
+- Yaw/cube loss implementations are simplified (could be more sophisticated)
+- No inpainting support yet (would need mask handling)
+- No ControlNet integration yet
 
-**Performance Optimizations**:
+### 7.2 Future Enhancements
+
+**Performance**:
 - [ ] Implement attention slicing for lower VRAM
-- [ ] Add xFormers memory efficient attention
-- [ ] Support model quantization (int8, int4)
-- [ ] Batch generation support
-- [ ] Persistent model caching
+- [ ] Add batch generation support
+- [ ] Optimize yaw/cube loss (run less frequently, cache results)
 
 **Features**:
-- [ ] ControlNet integration for guided generation
-- [ ] Depth-to-panorama pipeline
+- [ ] Inpainting support (mask-guided generation)
+- [ ] Outpainting (extend existing panoramas)
+- [ ] ControlNet integration (depth/edge-guided panoramas)
+- [ ] Img2img workflow support
 - [ ] Video panorama generation (360° videos)
-- [ ] HDR panorama support
-- [ ] Lighting control (time of day, weather)
-- [ ] Style transfer for panoramas
 
-**Compatibility**:
-- [ ] AMD ROCm support
-- [ ] Intel Arc GPU support
-- [ ] Apple Silicon (MPS) support
-- [ ] CPU-only mode (for testing)
-
-**Usability**:
-- [ ] Web UI for quick generation
-- [ ] Preset library (indoor, outdoor, sci-fi, etc.)
-- [ ] Prompt templates and examples
-- [ ] One-click model installer
-- [ ] Quality presets (fast/balanced/quality)
+**Quality**:
+- [ ] More sophisticated yaw loss (multiple rotation angles)
+- [ ] Better cube loss (proper cubemap projection)
+- [ ] Lighting consistency checks
+- [ ] Automatic horizon leveling
 
 ---
 
-## 13. Appendix
+## 8. Appendix
 
-### 13.1 Glossary
+### 8.1 Circular Padding Mathematical Basis
 
-- **DiT**: Diffusion Transformer architecture
-- **Equirectangular**: Spherical projection mapping sphere to 2D rectangle (2:1 ratio)
-- **Circular Padding**: Wrapping edges for seamless panorama boundaries
-- **Yaw Loss**: Loss function ensuring rotational consistency
-- **Cube Loss**: Loss function for multi-scale distortion awareness
-- **VAE**: Variational Autoencoder for latent space compression
-- **LoRA**: Low-Rank Adaptation for efficient fine-tuning
-- **CFG**: Classifier-Free Guidance for prompt adherence
+Circular padding works because:
+1. Equirectangular projection wraps horizontally (0° = 360°)
+2. Left edge (0°) and right edge (360°) represent the same direction
+3. Padding ensures model "sees" this wraparound during generation
+4. Without padding, model treats edges as independent boundaries
 
-### 13.2 Reference Links
+**Visual Representation**:
+```
+Standard Padding (wrong):
+[0][0][0] [image data] [0][0][0]
+   ↑                        ↑
+Artificial boundaries create seam
 
-- **DiT360 Paper**: https://arxiv.org/abs/2510.11712
-- **DiT360 GitHub**: https://github.com/Insta360-Research-Team/DiT360
-- **DiT360 Models**: https://huggingface.co/Insta360-Research/DiT360-Panorama-Image-Generation
+Circular Padding (correct):
+[R][R][R] [image data] [L][L][L]
+   ↑                        ↑
+Right edge   Left edge wraps to right
+wraps to left
+```
+
+### 8.2 Why Losses Are Optional
+
+**Yaw Loss**: Improves rotational consistency but:
+- Requires 2-3 extra model forward passes per step
+- Most panoramas look good without it
+- Main benefit: Very large panoramas (4096×2048+)
+
+**Cube Loss**: Reduces pole distortion but:
+- Requires additional computations
+- Effect most visible near top/bottom 20% of image
+- Most users won't notice difference
+
+**Recommendation**: Enable for final renders, disable for testing.
+
+### 8.3 Reference Links
+
+- **DiT360 LoRA**: https://huggingface.co/Insta360-Research/DiT360-Panorama-Image-Generation
 - **FLUX.1-dev**: https://huggingface.co/black-forest-labs/FLUX.1-dev
 - **ComfyUI**: https://github.com/comfyanonymous/ComfyUI
-- **ComfyUI Documentation**: https://docs.comfy.org/
+- **Three.js**: https://threejs.org/
+- **Equirectangular Projection**: https://en.wikipedia.org/wiki/Equirectangular_projection
 
-### 13.3 License
+### 8.4 License
 
 This project is licensed under Apache License 2.0.
 
-DiT360 model is subject to FLUX.1-dev license terms.
-
-### 13.4 Acknowledgments
-
-- Insta360 Research Team for DiT360 model
-- Black Forest Labs for FLUX.1-dev base model
-- ComfyUI community for node pack patterns
-- Kijai for OpenDiTWrapper and WanVideoWrapper examples
+FLUX.1-dev and DiT360 LoRA are subject to their respective license terms.

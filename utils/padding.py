@@ -156,6 +156,62 @@ def circular_conv2d(
     return F.conv2d(input, weight, bias, stride, padding, dilation, groups)
 
 
+def create_circular_padding_wrapper(model, circular_padding: int):
+    """
+    Create a wrapper that applies circular padding to model forward passes
+
+    This wraps the model's apply_model function to automatically add
+    circular padding before each forward pass and remove it afterwards.
+    This is used in Equirect360KSampler to apply padding during sampling.
+
+    Args:
+        model: ComfyUI model object
+        circular_padding: Padding width in latent space
+
+    Returns:
+        Modified model with circular padding applied
+
+    Example:
+        >>> from comfy.model_patcher import ModelPatcher
+        >>> model = load_model(...)  # Load FLUX model
+        >>> model = create_circular_padding_wrapper(model, circular_padding=16)
+        >>> # Now all model forward passes will use circular padding
+    """
+    if circular_padding <= 0:
+        return model
+
+    # Store original apply_model function
+    original_apply_model = model.model.apply_model
+
+    def wrapped_apply_model(x, t, **kwargs):
+        """
+        Wrapped apply_model with circular padding
+
+        Args:
+            x: Input latent
+            t: Timestep
+            **kwargs: Other arguments passed through
+
+        Returns:
+            Model output with padding removed
+        """
+        # Apply circular padding to input
+        x_padded = apply_circular_padding(x, circular_padding)
+
+        # Call original model
+        output_padded = original_apply_model(x_padded, t, **kwargs)
+
+        # Remove padding from output
+        output = remove_circular_padding(output_padded, circular_padding)
+
+        return output
+
+    # Replace model's apply_model
+    model.model.apply_model = wrapped_apply_model
+
+    return model
+
+
 def test_circular_padding():
     """
     Test function to validate circular padding implementation

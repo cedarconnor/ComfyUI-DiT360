@@ -1,35 +1,42 @@
 """
-ComfyUI-DiT360: Panoramic image generation using DiT360 model
+ComfyUI-DiT360: 360° Panorama Generation Enhancement Nodes
 
-A custom node pack for generating high-fidelity 360-degree equirectangular
-panoramic images using the DiT360 diffusion transformer model.
+Enhancement nodes for generating seamless equirectangular panoramic images
+using FLUX.1-dev with the DiT360 LoRA adapter.
+
+DiT360 is a LoRA adapter (~2-5GB), not a full model. Users load FLUX.1-dev
+normally via standard ComfyUI nodes, then apply the DiT360 LoRA using the
+standard Load LoRA node.
+
+This node pack provides 5 enhancement nodes:
+1. Equirect360EmptyLatent - 2:1 aspect ratio helper
+2. Equirect360KSampler - Sampling with circular padding + optional losses
+3. Equirect360VAEDecode - VAE decode with circular padding
+4. Equirect360EdgeBlender - Post-processing edge blending
+5. Equirect360Viewer - Interactive 360° preview (Three.js)
 
 Author: ComfyUI-DiT360 Contributors
 License: Apache 2.0
-Version: 0.1.0
+Version: 2.0.0
 """
 
 from .nodes import NODE_CLASS_MAPPINGS, NODE_DISPLAY_NAME_MAPPINGS
-
-# Register custom model paths
-import folder_paths
 import os
-from pathlib import Path
-
-# Add dit360 model directory
-dit360_models_dir = Path(folder_paths.models_dir) / "dit360"
-dit360_models_dir.mkdir(parents=True, exist_ok=True)
-folder_paths.add_model_folder_path("dit360", str(dit360_models_dir))
 
 # Version info
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 __author__ = "ComfyUI-DiT360 Contributors"
 __license__ = "Apache 2.0"
 
+# Register web directory for Three.js viewer
+WEB_DIRECTORY = os.path.join(os.path.dirname(__file__), "web")
+
 # Export for ComfyUI
-__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS']
+__all__ = ['NODE_CLASS_MAPPINGS', 'NODE_DISPLAY_NAME_MAPPINGS', 'WEB_DIRECTORY']
 
 print(f"\n{'='*60}")
-print(f"ComfyUI-DiT360 v{__version__} loaded")
-print(f"Model directory: {dit360_models_dir}")
+print(f"✅ ComfyUI-DiT360 v{__version__} loaded")
+print(f"   • 5 enhancement nodes for 360° panoramas")
+print(f"   • Works with FLUX.1-dev + DiT360 LoRA")
+print(f"   • Circular padding for seamless edges")
 print(f"{'='*60}\n")
