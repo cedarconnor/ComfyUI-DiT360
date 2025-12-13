@@ -357,3 +357,206 @@ Implement proper circular position embeddings and attention masks. This may requ
 4. Document that full circular padding requires the DiT360 LoRA (which was trained with circular awareness)
 
 The DiT360 LoRA itself was trained with circular padding in the attention mechanism, so using the LoRA with proper circular VAE decode and edge blending should give reasonable results even without full attention patching.
+
+---
+
+## Analysis: ChatGPT vs Gemini Approaches
+
+Both AI assistants provided valid approaches. Here's how they compare:
+
+### ChatGPT's Approach: Module Iteration + Conv2d Wrapping
+
+```python
+# ChatGPT's recommended pattern
+def patch_model_convs(model, tiling_mode="x_only"):
+    for name, module in model.model.diffusion_model.modules():
+        if isinstance(module, nn.Conv2d):
+            # Wrap with circular padding
+            wrapper = CircularConvWrapper(module)
+            # Replace in-place or return patched model
+```
+
+**Pros:**
+- Simple to implement
+- Works well for UNet architectures (SD 1.5, SDXL)
+- Catches ALL Conv2d layers
+
+**Cons for FLUX/DiT:**
+- FLUX has very few Conv2d layers (only PatchEmbed + VAE)
+- 95%+ of computation is in Linear layers and Attention
+- Won't fix the core topology issue
+
+### Gemini's Approach: `add_object_patch` API
+
+```python
+# Gemini's recommended pattern using ComfyUI API
+def apply_circular(model, tiling_mode, patch_embed_only):
+    model_clone = model.clone()
+
+    for name, module in search_target.named_modules():
+        if isinstance(module, nn.Conv2d):
+            if "patch_embed" in name:  # Focus on critical layer
+                patch_key = f"diffusion_model.{name}"
+                wrapper = CircularWrapper(module, tiling_mode)
+                model_clone.add_object_patch(patch_key, wrapper)
+
+    return (model_clone,)
+```
+
+**Pros:**
+- Uses official ComfyUI API
+- Creates isolated clone (doesn't corrupt global state)
+- Focuses on the critical `PatchEmbed` layer
+
+**Cons:**
+- `add_object_patch` behavior depends on ComfyUI version
+- May not work for all model architectures
+- Still doesn't address attention/RoPE
+
+### What Both Miss: The RoPE Problem
+
+Neither fully addresses that FLUX uses **Rotary Position Embeddings (RoPE)**:
+
+```python
+# The problem:
+# Token at x=0 gets RoPE for position 0
+# Token at x=255 gets RoPE for position 255
+# Even with circular padding, attention "knows" they're far apart
+
+# RoPE formula:
+# q_rotated = q * cos(θ * position) + rotate(q) * sin(θ * position)
+# k_rotated = k * cos(θ * position) + rotate(k) * sin(θ * position)
+
+# For position 0 and 255 to be "adjacent", you'd need:
+# position 0 → θ = 0
+# position 255 → θ ≈ 2π (wraps back to ≈ 0)
+```
+
+**True circular RoPE would require:**
+```python
+def circular_rope(positions, width, dim):
+    """RoPE that treats position 0 and width-1 as adjacent"""
+    # Map linear position to angle on circle
+    theta = 2 * np.pi * positions / width  # Now 0 and width-1 are close!
+
+    # Standard RoPE with circular positions
+    freqs = 1.0 / (10000 ** (torch.arange(0, dim, 2) / dim))
+    angles = theta.unsqueeze(-1) * freqs.unsqueeze(0)
+
+    return torch.cos(angles), torch.sin(angles)
+```
+
+### Synthesis: Recommended Implementation Order
+
+| Priority | Approach | Effectiveness | Complexity | Source |
+|----------|----------|---------------|------------|--------|
+| 1 | VAE Conv2d circular | HIGH for decode | LOW | Both |
+| 2 | PatchEmbed circular | MEDIUM | LOW | Gemini |
+| 3 | All Conv2d circular | LOW for DiT | LOW | ChatGPT |
+| 4 | Edge blending | MEDIUM (cosmetic) | LOW | Original |
+| 5 | Attention patches | HIGH | HIGH | Neither fully |
+| 6 | Circular RoPE | HIGHEST | VERY HIGH | Neither |
+
+### Practical Code: Combining Best of Both
+
+```python
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class CircularConv2d(nn.Module):
+    """Wrapper that applies circular padding in X, zeros in Y"""
+
+    def __init__(self, original_conv):
+        super().__init__()
+        self.conv = original_conv
+        self.padding = original_conv.padding
+
+    def forward(self, x):
+        pad_h, pad_w = self.padding if isinstance(self.padding, tuple) else (self.padding, self.padding)
+
+        if pad_w > 0:
+            # Circular pad width (horizontal wraparound)
+            left = x[..., -pad_w:]
+            right = x[..., :pad_w]
+            x = torch.cat([left, x, right], dim=-1)
+
+        if pad_h > 0:
+            # Zero pad height (top/bottom)
+            x = F.pad(x, (0, 0, pad_h, pad_h), mode='constant', value=0)
+
+        # Run conv with padding=0 (we already padded)
+        return F.conv2d(
+            x, self.conv.weight, self.conv.bias,
+            self.conv.stride, padding=0,
+            self.conv.dilation, self.conv.groups
+        )
+
+
+class ApplyCircularPadding:
+    """ComfyUI node that patches Conv2d layers for panorama generation"""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "scope": (["vae_only", "patch_embed_only", "all_conv2d"],),
+            }
+        }
+
+    RETURN_TYPES = ("MODEL",)
+    FUNCTION = "apply"
+    CATEGORY = "DiT360"
+
+    def apply(self, model, scope):
+        # CRITICAL: Clone to avoid corrupting global state
+        model_clone = model.clone()
+
+        # Get the underlying PyTorch model
+        base = model_clone.model
+        targets = []
+
+        if scope == "vae_only":
+            # VAE has most Conv2d layers
+            if hasattr(base, 'first_stage_model'):
+                targets.append(('vae', base.first_stage_model))
+        elif scope == "patch_embed_only":
+            # Just the PatchEmbed layer (most critical for DiT)
+            if hasattr(base, 'diffusion_model'):
+                for name, mod in base.diffusion_model.named_modules():
+                    if 'patch_embed' in name.lower() or 'x_embedder' in name.lower():
+                        targets.append((name, mod))
+        else:
+            # All Conv2d layers
+            if hasattr(base, 'diffusion_model'):
+                targets.append(('diffusion_model', base.diffusion_model))
+            if hasattr(base, 'first_stage_model'):
+                targets.append(('vae', base.first_stage_model))
+
+        # Patch the layers
+        patched = 0
+        for prefix, target in targets:
+            for name, module in target.named_modules():
+                if isinstance(module, nn.Conv2d) and module.padding[0] > 0:
+                    # Store original and set circular mode
+                    # Note: Direct padding_mode change may not work for all ops
+                    # Using wrapper is more reliable
+                    try:
+                        module.padding_mode = 'circular'
+                        patched += 1
+                    except:
+                        pass  # Some modules don't support this
+
+        print(f"[DiT360] Patched {patched} Conv2d layers to circular mode")
+        return (model_clone,)
+```
+
+### Bottom Line
+
+**Both ChatGPT and Gemini are correct that you CAN do this without core mods.** The key insights:
+
+1. **ChatGPT's insight**: Iterate modules, wrap Conv2d - works for UNet
+2. **Gemini's insight**: Use `add_object_patch`, focus on PatchEmbed - more targeted for DiT
+3. **What both miss**: For FLUX/DiT, the attention mechanism and RoPE are the bigger issues
+4. **Reality**: The DiT360 LoRA was trained WITH circular awareness baked in, so it compensates for some of the inference-time limitations
