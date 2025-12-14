@@ -31,6 +31,10 @@ def apply_circular_padding(
     if tensor.ndim != 4:
         raise ValueError(f"Expected 4D tensor, got {tensor.ndim}D")
 
+    # Early return if no padding needed
+    if padding <= 0:
+        return tensor
+
     # Detect format by checking last dimension
     # Image format has C=3 or 4 (RGB/RGBA) as last dim
     # Latent format has W (width, typically large) as last dim
@@ -72,15 +76,22 @@ def remove_circular_padding(
     if tensor.ndim != 4:
         raise ValueError(f"Expected 4D tensor, got {tensor.ndim}D")
 
+    # Early return if no padding to remove
+    if padding <= 0:
+        return tensor
+
     # Detect format by checking last dimension
     is_image_format = tensor.shape[-1] in (3, 4) and tensor.shape[1] > 4
 
     if not is_image_format:
         # Latent format: (B, C, H, W)
-        return tensor[:, :, :, padding:-padding]
+        # Use explicit slicing to avoid -0 issue
+        width = tensor.shape[3]
+        return tensor[:, :, :, padding:width-padding]
     else:
         # Image format: (B, H, W, C)
-        return tensor[:, :, padding:-padding, :]
+        width = tensor.shape[2]
+        return tensor[:, :, padding:width-padding, :]
 
 
 def circular_conv2d(
@@ -143,41 +154,35 @@ def create_circular_padding_wrapper(model, circular_padding: int):
     """
     Create a wrapper that applies circular padding to model forward passes
 
-    This wraps the model's apply_model function to automatically add
-    circular padding before each forward pass and remove it afterwards.
-    This is used in Equirect360KSampler to apply padding during sampling.
+    IMPORTANT: Only call this on a model.clone(), never on the original model!
+    This function mutates model.model.apply_model and can leak if not used carefully.
 
     Args:
-        model: ComfyUI model object
+        model: ComfyUI ModelPatcher object (must be a clone!)
         circular_padding: Padding width in latent space
 
     Returns:
-        Modified model with circular padding applied
+        Model with circular padding wrapper applied
 
     Example:
-        >>> from comfy.model_patcher import ModelPatcher
-        >>> model = load_model(...)  # Load FLUX model
-        >>> model = create_circular_padding_wrapper(model, circular_padding=16)
-        >>> # Now all model forward passes will use circular padding
+        >>> model_clone = model.clone()  # CRITICAL: always clone first!
+        >>> model_clone = create_circular_padding_wrapper(model_clone, 16)
     """
     if circular_padding <= 0:
         return model
 
+    # Get the underlying model
+    underlying_model = model.model
+
+    # Check if already wrapped (avoid double-wrapping)
+    if hasattr(underlying_model, '_original_apply_model_circ'):
+        return model  # Already wrapped
+
     # Store original apply_model function
-    original_apply_model = model.model.apply_model
+    original_apply_model = underlying_model.apply_model
 
     def wrapped_apply_model(x, t, **kwargs):
-        """
-        Wrapped apply_model with circular padding
-
-        Args:
-            x: Input latent
-            t: Timestep
-            **kwargs: Other arguments passed through
-
-        Returns:
-            Model output with padding removed
-        """
+        """Wrapped apply_model with circular padding"""
         # Apply circular padding to input
         x_padded = apply_circular_padding(x, circular_padding)
 
@@ -189,8 +194,9 @@ def create_circular_padding_wrapper(model, circular_padding: int):
 
         return output
 
-    # Replace model's apply_model
-    model.model.apply_model = wrapped_apply_model
+    # Replace model's apply_model and store original for restoration
+    underlying_model.apply_model = wrapped_apply_model
+    underlying_model._original_apply_model_circ = original_apply_model
 
     return model
 

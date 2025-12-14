@@ -162,7 +162,15 @@ class ApplyCircularPanorama:
         return (model_clone,)
 
     def _patch_conv2d(self, model) -> int:
-        """Patch Conv2d layers to use circular padding."""
+        """
+        Patch Conv2d layers to use X-only circular padding.
+
+        NOTE: PyTorch's padding_mode='circular' wraps both X and Y.
+        For panoramas, we need X-only (width wraps, height doesn't).
+        This implementation wraps the forward method to apply custom padding.
+        """
+        import torch.nn.functional as F
+
         patched = 0
         base = model.model if hasattr(model, 'model') else model
 
@@ -177,9 +185,44 @@ class ApplyCircularPanorama:
                 if isinstance(module, nn.Conv2d):
                     if hasattr(module, 'padding') and module.padding[0] > 0:
                         try:
-                            module.padding_mode = 'circular'
-                            patched += 1
-                        except Exception:
+                            # Store original forward
+                            if not hasattr(module, '_original_forward'):
+                                module._original_forward = module.forward
+
+                                # Get padding values
+                                if isinstance(module.padding, int):
+                                    pad_h = pad_w = module.padding
+                                else:
+                                    pad_h, pad_w = module.padding
+
+                                # Create custom forward with X-only circular padding
+                                def make_circular_forward(conv_module, orig_forward, pad_h, pad_w):
+                                    def circular_x_forward(x):
+                                        # Apply Y padding (top/bottom) with zeros
+                                        if pad_h > 0:
+                                            x = F.pad(x, (0, 0, pad_h, pad_h), mode='constant', value=0)
+
+                                        # Apply X padding (left/right) with circular wrapping
+                                        if pad_w > 0:
+                                            left_edge = x[:, :, :, :pad_w]
+                                            right_edge = x[:, :, :, -pad_w:]
+                                            x = torch.cat([right_edge, x, left_edge], dim=3)
+
+                                        # Call original conv with padding=0 (we've already padded)
+                                        return F.conv2d(
+                                            x,
+                                            conv_module.weight,
+                                            conv_module.bias,
+                                            conv_module.stride,
+                                            padding=0,  # We've done padding manually
+                                            dilation=conv_module.dilation,
+                                            groups=conv_module.groups
+                                        )
+                                    return circular_x_forward
+
+                                module.forward = make_circular_forward(module, module._original_forward, pad_h, pad_w)
+                                patched += 1
+                        except Exception as e:
                             pass
 
         return patched

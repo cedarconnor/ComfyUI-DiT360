@@ -121,21 +121,25 @@ class YawLoss(nn.Module):
         for yaw in yaw_angles:
             yaw_deg = yaw.item()
 
-            # Rotate image forward
-            rotated_forward = rotate_equirect_yaw(image, yaw_deg)
+            # Rotate image
+            rotated = rotate_equirect_yaw(image, yaw_deg)
 
-            # Rotate back
-            rotated_back = rotate_equirect_yaw(rotated_forward, -yaw_deg)
-
-            # Compute difference
+            # Compare rotated with original to measure consistency
+            # A seamless panorama should have similar statistics when rotated
             if self.loss_type == "l1":
-                loss = F.l1_loss(rotated_back, image)
+                # Compare content consistency
+                loss = F.l1_loss(rotated, image, reduction='mean')
             elif self.loss_type == "l2":
-                loss = F.mse_loss(rotated_back, image)
-            else:  # perceptual (simple approximation using gradient)
-                grad_orig = torch.abs(image[:, :, :, 1:] - image[:, :, :, :-1])
-                grad_rot = torch.abs(rotated_back[:, :, :, 1:] - rotated_back[:, :, :, :-1])
-                loss = F.mse_loss(grad_rot, grad_orig)
+                # Compare content consistency
+                loss = F.mse_loss(rotated, image, reduction='mean')
+            else:  # perceptual (gradient-based edge consistency)
+                # Compare edge structures - edges should be consistent when rotated
+                grad_orig_h = torch.abs(image[:, :, 1:, :] - image[:, :, :-1, :])
+                grad_orig_w = torch.abs(image[:, :, :, 1:] - image[:, :, :, :-1])
+                grad_rot_h = torch.abs(rotated[:, :, 1:, :] - rotated[:, :, :-1, :])
+                grad_rot_w = torch.abs(rotated[:, :, :, 1:] - rotated[:, :, :, :-1])
+                loss = (F.mse_loss(grad_rot_h, grad_orig_h) +
+                       F.mse_loss(grad_rot_w, grad_orig_w)) / 2
 
             total_loss = total_loss + loss
 
