@@ -557,16 +557,12 @@ def get_model_rope_embedder(model) -> Optional[nn.Module]:
 
     for name in embedder_names:
         if hasattr(model, name):
-            embedder = getattr(model, name)
-            print(f"[CircularRoPE] Found embedder: {name} -> {type(embedder).__name__}")
-            return embedder
+            return getattr(model, name)
 
     # Search recursively in named_modules
     for name, module in model.named_modules():
         name_lower = name.lower()
-        # Look for pe_embedder specifically first
         if 'pe_embedder' in name_lower or 'pos_embed' in name_lower:
-            print(f"[CircularRoPE] Found embedder via search: {name} -> {type(module).__name__}")
             return module
 
     # Broader search
@@ -574,10 +570,8 @@ def get_model_rope_embedder(model) -> Optional[nn.Module]:
         name_lower = name.lower()
         for emb_name in embedder_names:
             if emb_name in name_lower:
-                print(f"[CircularRoPE] Found embedder via broad search: {name} -> {type(module).__name__}")
                 return module
 
-    print(f"[CircularRoPE] Could not find RoPE embedder. Model type: {type(model).__name__}")
     return None
 
 
@@ -601,7 +595,6 @@ def patch_model_for_circular_rope(
     embedder = get_model_rope_embedder(model)
 
     if embedder is None:
-        print("[CircularRoPE] Warning: Could not find RoPE embedder in model")
         return False
 
     # Get the parent module to replace the embedder
@@ -630,12 +623,10 @@ def patch_model_for_circular_rope(
     # Create wrapped embedder
     wrapped = create_circular_rope_wrapper(embedder, circular_axis)
 
-    # Find and replace the embedder
-    # IMPORTANT: pe_embedder is first - it's what FLUX uses!
+    # Find and replace the embedder (pe_embedder is most common for FLUX)
     for name in ['pe_embedder', 'pos_embed', 'rope_embedder', 'position_embedder', 'rotary_emb']:
         if hasattr(diffusion_model, name):
             setattr(diffusion_model, name, wrapped)
-            print(f"[CircularRoPE] Patched {name} for circular topology (model_type={model_type})")
             return True
 
     # Also check model.model directly (some architectures)
@@ -644,12 +635,8 @@ def patch_model_for_circular_rope(
         for name in ['pe_embedder', 'pos_embed', 'rope_embedder']:
             if hasattr(diff, name):
                 setattr(diff, name, wrapped)
-                print(f"[CircularRoPE] Patched model.model.diffusion_model.{name} (model_type={model_type})")
                 return True
 
-    print("[CircularRoPE] Warning: Found embedder but couldn't replace it")
-    print(f"[CircularRoPE] diffusion_model type: {type(diffusion_model).__name__}")
-    print(f"[CircularRoPE] Available attrs: {[a for a in dir(diffusion_model) if not a.startswith('_')][:20]}")
     return False
 
 

@@ -87,9 +87,10 @@ class Equirect360EmptyLatent:
         # Get valid equirectangular dimensions
         width, height = get_equirect_dimensions(width, alignment=16)
 
-        # FLUX uses 16x compression factor, 16 channels
-        latent_width = width // 16
-        latent_height = height // 16
+        # FLUX VAE uses 8x spatial compression, 16 channels
+        # (The 16 is channels, NOT compression factor!)
+        latent_width = width // 8
+        latent_height = height // 8
 
         # Create empty latent (16 channels for FLUX)
         latent = torch.zeros(
@@ -97,7 +98,7 @@ class Equirect360EmptyLatent:
             dtype=torch.float32
         )
 
-        print(f"✅ Created equirectangular latent: {width}×{height} image → {latent_width}×{latent_height} latent (2:1 ratio)")
+        print(f"✅ Created equirectangular latent: {width}×{height} image → {latent_width}×{latent_height} latent (2:1 ratio, 16ch FLUX)")
 
         return ({"samples": latent},)
 
@@ -316,34 +317,25 @@ class Equirect360VAEDecode:
     CATEGORY = "DiT360/vae"
 
     def decode(self, samples, vae, circular_padding):
-        """
-        Decode latent with circular padding
-        """
-
+        """Decode latent with circular padding"""
         latent = samples["samples"]
 
+        # VAE uses 8x spatial compression (FLUX has 16 channels but still 8x scale)
+        vae_scale = 8
+
         if circular_padding > 0:
-            # Apply padding before decode
             latent_padded = apply_circular_padding(latent, circular_padding)
-
-            # Decode with VAE
             image_padded = vae.decode(latent_padded)
-
-            # Remove padding (16x upscale factor for FLUX VAE)
-            padding_pixels = circular_padding * 8  # VAE upscales 8x
+            padding_pixels = circular_padding * vae_scale
             image = remove_circular_padding(image_padded, padding_pixels)
-
-            print(f"🔄 VAE decoded with circular padding: {circular_padding} latent → {padding_pixels} pixels")
         else:
-            # Standard decode
             image = vae.decode(latent)
-            print("⚠️ VAE decoded without circular padding")
 
         # Ensure ComfyUI format: (B, H, W, C)
-        if image.ndim == 4 and image.shape[1] == 3:  # (B, 3, H, W) → (B, H, W, 3)
+        if image.ndim == 4 and image.shape[1] == 3:
             image = image.permute(0, 2, 3, 1)
 
-        print(f"✅ Decoded to {image.shape[2]}×{image.shape[1]} panorama")
+        print(f"✅ Decoded {image.shape[2]}×{image.shape[1]} panorama")
 
         return (image,)
 
