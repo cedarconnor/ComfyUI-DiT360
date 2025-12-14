@@ -279,7 +279,8 @@ def create_circular_rope_wrapper(original_embedder: nn.Module, circular_axis: in
     """
     Wrap an existing RoPE embedder to use circular positions in one axis.
 
-    This is the key function for patching existing models!
+    This makes position X wrap around so that position 0 and position W-1
+    are adjacent (for seamless 360° panoramas).
 
     Args:
         original_embedder: The model's original position embedder
@@ -287,63 +288,41 @@ def create_circular_rope_wrapper(original_embedder: nn.Module, circular_axis: in
 
     Returns:
         Wrapped embedder that produces circular RoPE
-
-    Example:
-        >>> # For FLUX
-        >>> model.diffusion_model.pos_embed = create_circular_rope_wrapper(
-        ...     model.diffusion_model.pos_embed,
-        ...     circular_axis=-1  # X dimension
-        ... )
     """
     original_forward = original_embedder.forward
 
-    # Get theta_base from original if available
-    theta_base = getattr(original_embedder, 'theta', 10000.0)
-    if hasattr(original_embedder, 'theta_base'):
-        theta_base = original_embedder.theta_base
-
     def circular_forward(ids: torch.Tensor, *args, **kwargs) -> torch.Tensor:
-        """
-        Wrapped forward that applies circular mapping to specified axis.
-        """
-        # Get original output shape info
-        original_output = original_forward(ids, *args, **kwargs)
+        """Apply circular mapping to the specified axis before calling original."""
+        # ids shape: (B, N, num_axes) where axes are typically [t, y, x]
+        if ids.dim() < 2:
+            return original_forward(ids, *args, **kwargs)
 
-        # Determine spatial dimensions
-        # ids typically has shape (B, N, num_axes) where last axis has [t, y, x] or [y, x]
-        if ids.dim() >= 2:
-            n_axes = ids.shape[-1]
+        n_axes = ids.shape[-1]
+        if n_axes < 2:
+            return original_forward(ids, *args, **kwargs)
 
-            # Modify the circular axis (usually X)
-            # Map linear positions to circular angles
-            if ids.shape[-1] >= 2:  # At least 2D spatial
-                modified_ids = ids.clone()
+        axis_idx = circular_axis if circular_axis >= 0 else n_axes + circular_axis
 
-                # Get the axis to make circular
-                axis_idx = circular_axis if circular_axis >= 0 else n_axes + circular_axis
+        # Clone and convert to float for angle computation
+        ids_mod = ids.clone().float()
 
-                # Get max position in this axis to determine "width"
-                max_pos = ids[..., axis_idx].max().item() + 1
+        # Get width from max position (assumes positions are 0..W-1)
+        width = float(ids_mod[..., axis_idx].max().item() + 1.0)
 
-                # Convert to circular: θ = 2π * pos / max_pos
-                circular_pos = 2 * math.pi * ids[..., axis_idx] / max_pos
+        if width > 1.0:
+            # Scale positions to angles: θ = 2π * x / W
+            # This makes position 0 and W-1 adjacent on the circle
+            # RoPE naturally handles the periodicity at 2π
+            ids_mod[..., axis_idx] = ids_mod[..., axis_idx] * (2.0 * math.pi / width)
 
-                # The trick: RoPE uses positions directly in rotation
-                # By scaling positions to [0, 2π), we make the topology circular
-                # because RoPE's rotation naturally wraps at 2π
-                modified_ids[..., axis_idx] = circular_pos / (2 * math.pi / max_pos)
+        return original_forward(ids_mod, *args, **kwargs)
 
-                return original_forward(modified_ids, *args, **kwargs)
-
-        return original_output
-
-    # Create wrapper class that mimics original
     class CircularWrapper(nn.Module):
         def __init__(self, orig):
             super().__init__()
             self._original = orig
-            # Copy attributes
-            for attr in ['theta', 'theta_base', 'axes_dim', 'dim']:
+            # Copy important attributes
+            for attr in ['theta', 'theta_base', 'axes_dim', 'dim', 'in_dim', 'out_dim']:
                 if hasattr(orig, attr):
                     setattr(self, attr, getattr(orig, attr))
 
