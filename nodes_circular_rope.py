@@ -30,16 +30,28 @@ except ImportError:
     COMFYUI_AVAILABLE = False
     print("[CircularRoPE] Warning: ComfyUI not found, running in standalone mode")
 
-# Local imports
-from .utils.circular_rope import (
-    CircularRoPEEmbedding,
-    CircularPosEmbedFlux,
-    CircularPosEmbedQwen,
-    CircularPosEmbedZImage,
-    create_circular_rope_wrapper,
-    get_model_rope_embedder,
-    patch_model_for_circular_rope,
-)
+# Local imports - with fallback for standalone testing
+try:
+    from .utils.circular_rope import (
+        CircularRoPEEmbedding,
+        CircularPosEmbedFlux,
+        CircularPosEmbedQwen,
+        CircularPosEmbedZImage,
+        create_circular_rope_wrapper,
+        get_model_rope_embedder,
+        patch_model_for_circular_rope,
+    )
+except ImportError:
+    # Fallback for direct execution or if utils not yet loaded
+    from utils.circular_rope import (
+        CircularRoPEEmbedding,
+        CircularPosEmbedFlux,
+        CircularPosEmbedQwen,
+        CircularPosEmbedZImage,
+        create_circular_rope_wrapper,
+        get_model_rope_embedder,
+        patch_model_for_circular_rope,
+    )
 
 
 # =============================================================================
