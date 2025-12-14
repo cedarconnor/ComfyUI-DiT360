@@ -21,45 +21,32 @@ def apply_circular_padding(
 
     Args:
         tensor: Input tensor, can be:
-            - Latent format: (B, C, H, W) where C <= 4
-            - Image format: (B, H, W, C) where C = 3
+            - Latent format: (B, C, H, W) - padding applied to W dimension
+            - Image format: (B, H, W, C) - padding applied to W dimension
         padding: Number of pixels to pad on left/right edges
 
     Returns:
         Padded tensor with wraparound continuity
-
-    Example:
-        >>> latent = torch.rand(1, 4, 128, 256)  # Latent
-        >>> padded = apply_circular_padding(latent, padding=10)
-        >>> padded.shape
-        torch.Size([1, 4, 128, 276])  # Width increased by 20 (10 each side)
-
-        >>> image = torch.rand(1, 1024, 2048, 3)  # Image
-        >>> padded = apply_circular_padding(image, padding=20)
-        >>> padded.shape
-        torch.Size([1, 1024, 2088, 3])  # Width increased by 40 (20 each side)
     """
     if tensor.ndim != 4:
         raise ValueError(f"Expected 4D tensor, got {tensor.ndim}D")
 
-    # Detect format: (B, C, H, W) vs (B, H, W, C)
-    if tensor.shape[1] <= 4:
-        # Latent format: (B, C, H, W)
-        # Take from width dimension (dim 3)
-        left_edge = tensor[:, :, :, :padding]      # Leftmost columns
-        right_edge = tensor[:, :, :, -padding:]    # Rightmost columns
+    # Detect format by checking last dimension
+    # Image format has C=3 or 4 (RGB/RGBA) as last dim
+    # Latent format has W (width, typically large) as last dim
+    is_image_format = tensor.shape[-1] in (3, 4) and tensor.shape[1] > 4
 
-        # Concatenate: right_edge | tensor | left_edge
-        # This wraps the right edge to the left side and vice versa
+    if not is_image_format:
+        # Latent format: (B, C, H, W) - includes FLUX 16-channel
+        # Pad width dimension (dim 3)
+        left_edge = tensor[:, :, :, :padding]
+        right_edge = tensor[:, :, :, -padding:]
         padded = torch.cat([right_edge, tensor, left_edge], dim=3)
-
     else:
         # Image format: (B, H, W, C)
-        # Take from width dimension (dim 2)
-        left_edge = tensor[:, :, :padding, :]      # Leftmost columns
-        right_edge = tensor[:, :, -padding:, :]    # Rightmost columns
-
-        # Concatenate: right_edge | tensor | left_edge
+        # Pad width dimension (dim 2)
+        left_edge = tensor[:, :, :padding, :]
+        right_edge = tensor[:, :, -padding:, :]
         padded = torch.cat([right_edge, tensor, left_edge], dim=2)
 
     return padded
@@ -81,18 +68,14 @@ def remove_circular_padding(
 
     Returns:
         Tensor with padding removed
-
-    Example:
-        >>> padded = torch.rand(1, 4, 128, 276)
-        >>> original = remove_circular_padding(padded, padding=10)
-        >>> original.shape
-        torch.Size([1, 4, 128, 256])
     """
     if tensor.ndim != 4:
         raise ValueError(f"Expected 4D tensor, got {tensor.ndim}D")
 
-    # Detect format and remove padding from width dimension
-    if tensor.shape[1] <= 4:
+    # Detect format by checking last dimension
+    is_image_format = tensor.shape[-1] in (3, 4) and tensor.shape[1] > 4
+
+    if not is_image_format:
         # Latent format: (B, C, H, W)
         return tensor[:, :, :, padding:-padding]
     else:
@@ -213,50 +196,43 @@ def create_circular_padding_wrapper(model, circular_padding: int):
 
 
 def test_circular_padding():
-    """
-    Test function to validate circular padding implementation
-
-    Run this to ensure circular padding works correctly.
-    """
+    """Test circular padding implementation."""
     print("Testing circular padding...")
 
-    # Test 1: Latent format
-    print("\n1. Testing latent format (B, C, H, W)...")
+    # Test 1: SD/SDXL 4-channel latent
+    print("\n1. Testing 4-channel latent (B, C, H, W)...")
     latent = torch.rand(1, 4, 128, 256)
     padded = apply_circular_padding(latent, padding=10)
     unpadded = remove_circular_padding(padded, padding=10)
-
     assert padded.shape == (1, 4, 128, 276), f"Expected (1,4,128,276), got {padded.shape}"
-    assert unpadded.shape == latent.shape, f"Shape mismatch after removing padding"
-    assert torch.allclose(unpadded, latent), "Data corrupted after padding/unpadding"
-    print("   ✓ Latent format works correctly")
+    assert torch.allclose(unpadded, latent), "Data corrupted"
+    print("   ✓ 4-channel latent works")
 
-    # Test 2: Image format
-    print("\n2. Testing image format (B, H, W, C)...")
+    # Test 2: FLUX 16-channel latent
+    print("\n2. Testing FLUX 16-channel latent (B, C, H, W)...")
+    latent = torch.rand(1, 16, 128, 256)
+    padded = apply_circular_padding(latent, padding=16)
+    unpadded = remove_circular_padding(padded, padding=16)
+    assert padded.shape == (1, 16, 128, 288), f"Expected (1,16,128,288), got {padded.shape}"
+    assert torch.allclose(unpadded, latent), "Data corrupted"
+    print("   ✓ FLUX 16-channel latent works")
+
+    # Test 3: Image format
+    print("\n3. Testing image format (B, H, W, C)...")
     image = torch.rand(1, 1024, 2048, 3)
     padded = apply_circular_padding(image, padding=20)
     unpadded = remove_circular_padding(padded, padding=20)
-
     assert padded.shape == (1, 1024, 2088, 3), f"Expected (1,1024,2088,3), got {padded.shape}"
-    assert unpadded.shape == image.shape, f"Shape mismatch after removing padding"
-    assert torch.allclose(unpadded, image), "Data corrupted after padding/unpadding"
-    print("   ✓ Image format works correctly")
+    assert torch.allclose(unpadded, image), "Data corrupted"
+    print("   ✓ Image format works")
 
-    # Test 3: Wraparound continuity
-    print("\n3. Testing wraparound continuity...")
-    latent = torch.rand(1, 4, 128, 256)
+    # Test 4: Wraparound continuity
+    print("\n4. Testing wraparound continuity...")
+    latent = torch.rand(1, 16, 128, 256)
     padded = apply_circular_padding(latent, padding=10)
-
-    # Check that left padding matches original right edge
-    left_pad = padded[:, :, :, :10]
-    original_right = latent[:, :, :, -10:]
-    assert torch.allclose(left_pad, original_right), "Left padding doesn't match original right edge"
-
-    # Check that right padding matches original left edge
-    right_pad = padded[:, :, :, -10:]
-    original_left = latent[:, :, :, :10]
-    assert torch.allclose(right_pad, original_left), "Right padding doesn't match original left edge"
-    print("   ✓ Wraparound continuity verified")
+    assert torch.allclose(padded[:, :, :, :10], latent[:, :, :, -10:]), "Left padding mismatch"
+    assert torch.allclose(padded[:, :, :, -10:], latent[:, :, :, :10]), "Right padding mismatch"
+    print("   ✓ Wraparound verified")
 
     print("\n✅ All circular padding tests passed!\n")
 

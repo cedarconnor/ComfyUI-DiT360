@@ -10,24 +10,26 @@ Supports: FLUX.1/2, Qwen-Image, Z-Image, and other DiT-based models.
 
 import torch
 import torch.nn as nn
-from typing import Optional
-
-# ComfyUI imports
-try:
-    import comfy.model_patcher
-    COMFYUI_AVAILABLE = True
-except ImportError:
-    COMFYUI_AVAILABLE = False
 
 # Local imports
 try:
-    from .utils.circular_rope import (
-        patch_model_for_circular_rope,
-    )
+    from .utils.circular_rope import create_circular_rope_wrapper
 except ImportError:
-    from utils.circular_rope import (
-        patch_model_for_circular_rope,
-    )
+    from utils.circular_rope import create_circular_rope_wrapper
+
+
+def find_rope_embedder(model):
+    """Find the RoPE position embedder in a model."""
+    # Get the actual model
+    base = model.model if hasattr(model, 'model') else model
+    diff = base.diffusion_model if hasattr(base, 'diffusion_model') else base
+
+    # Check common attribute names (in priority order for FLUX)
+    for name in ['pe_embedder', 'pos_embed', 'rope_embedder', 'position_embedder']:
+        if hasattr(diff, name):
+            return name, getattr(diff, name)
+
+    return None, None
 
 
 class ApplyCircularRoPE:
@@ -43,13 +45,6 @@ class ApplyCircularRoPE:
         return {
             "required": {
                 "model": ("MODEL",),
-                "model_type": ([
-                    "auto",
-                    "flux",
-                    "qwen",
-                    "zimage",
-                    "generic",
-                ], {"default": "auto"}),
             },
             "optional": {
                 "enable": ("BOOLEAN", {"default": True}),
@@ -61,27 +56,38 @@ class ApplyCircularRoPE:
     FUNCTION = "apply_circular_rope"
     CATEGORY = "DiT360/position_encoding"
 
-    def apply_circular_rope(
-        self,
-        model,
-        model_type: str = "auto",
-        enable: bool = True
-    ):
+    def apply_circular_rope(self, model, enable: bool = True):
         if not enable:
             return (model,)
 
         model_clone = model.clone()
 
-        success = patch_model_for_circular_rope(
-            model_clone,
-            circular_axis=-1,  # X (horizontal) axis
-            model_type=model_type
-        )
+        # Find the embedder
+        attr_name, embedder = find_rope_embedder(model_clone)
 
-        if success:
-            print(f"[CircularRoPE] Patched for circular topology")
-        else:
-            print("[CircularRoPE] Warning: Could not patch model")
+        if embedder is None:
+            print("[CircularRoPE] Warning: Could not find RoPE embedder")
+            return (model_clone,)
+
+        # Create wrapped embedder
+        wrapped = create_circular_rope_wrapper(embedder, circular_axis=-1)
+
+        # Try add_object_patch first (preferred ComfyUI method)
+        patched = False
+        if hasattr(model_clone, 'add_object_patch'):
+            try:
+                model_clone.add_object_patch(f"diffusion_model.{attr_name}", wrapped)
+                patched = True
+                print(f"[CircularRoPE] Patched via add_object_patch: {attr_name}")
+            except Exception as e:
+                print(f"[CircularRoPE] add_object_patch failed: {e}")
+
+        # Fallback to direct setattr
+        if not patched:
+            base = model_clone.model if hasattr(model_clone, 'model') else model_clone
+            diff = base.diffusion_model if hasattr(base, 'diffusion_model') else base
+            setattr(diff, attr_name, wrapped)
+            print(f"[CircularRoPE] Patched via setattr: {attr_name}")
 
         return (model_clone,)
 
@@ -98,13 +104,6 @@ class ApplyCircularPanorama:
         return {
             "required": {
                 "model": ("MODEL",),
-                "model_type": ([
-                    "auto",
-                    "flux",
-                    "qwen",
-                    "zimage",
-                    "generic",
-                ], {"default": "auto"}),
             },
             "optional": {
                 "patch_conv2d": ("BOOLEAN", {"default": True}),
@@ -120,16 +119,10 @@ class ApplyCircularPanorama:
     def apply_all(
         self,
         model,
-        model_type: str = "auto",
         patch_conv2d: bool = True,
         patch_rope: bool = True,
     ):
         model_clone = model.clone()
-
-        # Detect model type
-        if model_type == "auto":
-            model_type = self._detect_model_type(model_clone)
-
         patches = []
 
         # Patch Conv2d layers for circular padding
@@ -140,28 +133,33 @@ class ApplyCircularPanorama:
 
         # Patch RoPE for circular topology
         if patch_rope:
-            if patch_model_for_circular_rope(model_clone, circular_axis=-1, model_type=model_type):
+            attr_name, embedder = find_rope_embedder(model_clone)
+
+            if embedder is not None:
+                wrapped = create_circular_rope_wrapper(embedder, circular_axis=-1)
+
+                # Try add_object_patch first
+                patched = False
+                if hasattr(model_clone, 'add_object_patch'):
+                    try:
+                        model_clone.add_object_patch(f"diffusion_model.{attr_name}", wrapped)
+                        patched = True
+                    except Exception:
+                        pass
+
+                if not patched:
+                    base = model_clone.model if hasattr(model_clone, 'model') else model_clone
+                    diff = base.diffusion_model if hasattr(base, 'diffusion_model') else base
+                    setattr(diff, attr_name, wrapped)
+
                 patches.append("RoPE")
 
         if patches:
             print(f"[CircularPanorama] Patched: {', '.join(patches)}")
+        else:
+            print("[CircularPanorama] Warning: No patches applied")
 
         return (model_clone,)
-
-    def _detect_model_type(self, model) -> str:
-        base = model.model if hasattr(model, 'model') else model
-        if hasattr(base, 'diffusion_model'):
-            class_name = type(base.diffusion_model).__name__.lower()
-        else:
-            class_name = type(base).__name__.lower()
-
-        if 'flux' in class_name:
-            return "flux"
-        elif 'qwen' in class_name:
-            return "qwen"
-        elif 'zimage' in class_name:
-            return "zimage"
-        return "generic"
 
     def _patch_conv2d(self, model) -> int:
         """Patch Conv2d layers to use circular padding."""
