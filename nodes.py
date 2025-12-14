@@ -254,20 +254,22 @@ class Equirect360KSampler:
         # Get latent samples
         latent = latent_image["samples"]
 
+        # Prepare noise for sampling
+        noise = comfy.sample.prepare_noise(latent, seed, None)
+
         # Use ComfyUI's standard sample function
         samples = comfy.sample.sample(
             model_clone,
-            comfy.utils.common_upscale(latent, latent.shape[3] * 8, latent.shape[2] * 8, "nearest-exact", "center")
-                if denoise < 1.0 else latent,  # Handle img2img
+            noise,  # Correct: pass noise, not latent
             steps,
             cfg,
             sampler_name,
             scheduler,
             positive,
             negative,
-            latent,
+            latent,  # This is the latent_image param for img2img
             denoise=denoise,
-            disable_noise=(denoise < 1.0),
+            disable_noise=False,
             start_step=0,
             last_step=steps,
             force_full_denoise=True,
@@ -433,8 +435,9 @@ class Equirect360Viewer:
         results = []
 
         for idx, image in enumerate(images):
-            # Convert tensor to PIL Image
-            img_np = (image.cpu().numpy() * 255).astype(np.uint8)
+            # Convert tensor to PIL Image (clamp to [0,1] first to avoid uint8 wrapping)
+            img_np = np.clip(image.cpu().numpy(), 0.0, 1.0)
+            img_np = (img_np * 255).astype(np.uint8)
             img_pil = Image.fromarray(img_np)
 
             # Resize if needed

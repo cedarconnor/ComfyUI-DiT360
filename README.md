@@ -1,5 +1,6 @@
-NOT WORKING YET!!!!!
+⚠️ **EXPERIMENTAL** - Active Development
 
+Major bugs recently fixed (circular RoPE, padding, sampling). Test thoroughly before production use.
 
 # ComfyUI-DiT360
 
