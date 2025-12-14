@@ -118,28 +118,54 @@ class YawLoss(nn.Module):
         yaw_angles = torch.rand(self.num_rotations, device=device) * self.max_yaw_degrees
         yaw_angles = yaw_angles - (self.max_yaw_degrees / 2)  # Center around 0
 
+        # For each rotation, check edge/seam consistency
+        # A seamless panorama should have matching left/right edges
         for yaw in yaw_angles:
             yaw_deg = yaw.item()
 
             # Rotate image
             rotated = rotate_equirect_yaw(image, yaw_deg)
 
-            # Compare rotated with original to measure consistency
-            # A seamless panorama should have similar statistics when rotated
+            # Detect format to get correct dimensions
+            if image.shape[1] <= 16:  # Likely (B, C, H, W)
+                width_dim = 3
+                width = image.shape[3]
+                edge_width = max(1, width // 32)  # Use ~3% of width for edge comparison
+            else:  # Likely (B, H, W, C)
+                width_dim = 2
+                width = image.shape[2]
+                edge_width = max(1, width // 32)
+
+            # Extract left and right edges
+            if width_dim == 3:  # (B, C, H, W)
+                left_edge = image[:, :, :, :edge_width]
+                right_edge = image[:, :, :, -edge_width:]
+                left_edge_rot = rotated[:, :, :, :edge_width]
+                right_edge_rot = rotated[:, :, :, -edge_width:]
+            else:  # (B, H, W, C)
+                left_edge = image[:, :, :edge_width, :]
+                right_edge = image[:, :, -edge_width:, :]
+                left_edge_rot = rotated[:, :, :edge_width, :]
+                right_edge_rot = rotated[:, :, -edge_width:, :]
+
+            # Measure edge consistency: left edge should match right edge
+            # (for seamless wraparound)
             if self.loss_type == "l1":
-                # Compare content consistency
-                loss = F.l1_loss(rotated, image, reduction='mean')
+                loss = F.l1_loss(left_edge, right_edge) + F.l1_loss(left_edge_rot, right_edge_rot)
             elif self.loss_type == "l2":
-                # Compare content consistency
-                loss = F.mse_loss(rotated, image, reduction='mean')
-            else:  # perceptual (gradient-based edge consistency)
-                # Compare edge structures - edges should be consistent when rotated
-                grad_orig_h = torch.abs(image[:, :, 1:, :] - image[:, :, :-1, :])
-                grad_orig_w = torch.abs(image[:, :, :, 1:] - image[:, :, :, :-1])
-                grad_rot_h = torch.abs(rotated[:, :, 1:, :] - rotated[:, :, :-1, :])
-                grad_rot_w = torch.abs(rotated[:, :, :, 1:] - rotated[:, :, :, :-1])
-                loss = (F.mse_loss(grad_rot_h, grad_orig_h) +
-                       F.mse_loss(grad_rot_w, grad_orig_w)) / 2
+                loss = F.mse_loss(left_edge, right_edge) + F.mse_loss(left_edge_rot, right_edge_rot)
+            else:  # perceptual - compare edge gradients
+                if width_dim == 3:  # (B, C, H, W)
+                    grad_left = torch.abs(left_edge[:, :, 1:, :] - left_edge[:, :, :-1, :])
+                    grad_right = torch.abs(right_edge[:, :, 1:, :] - right_edge[:, :, :-1, :])
+                    grad_left_rot = torch.abs(left_edge_rot[:, :, 1:, :] - left_edge_rot[:, :, :-1, :])
+                    grad_right_rot = torch.abs(right_edge_rot[:, :, 1:, :] - right_edge_rot[:, :, :-1, :])
+                else:  # (B, H, W, C)
+                    grad_left = torch.abs(left_edge[:, 1:, :, :] - left_edge[:, :-1, :, :])
+                    grad_right = torch.abs(right_edge[:, 1:, :, :] - right_edge[:, :-1, :, :])
+                    grad_left_rot = torch.abs(left_edge_rot[:, 1:, :, :] - left_edge_rot[:, :-1, :, :])
+                    grad_right_rot = torch.abs(right_edge_rot[:, 1:, :, :] - right_edge_rot[:, :-1, :, :])
+                loss = (F.mse_loss(grad_left, grad_right) + F.mse_loss(grad_left_rot, grad_right_rot)) / 2
 
             total_loss = total_loss + loss
 

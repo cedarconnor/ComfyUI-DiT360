@@ -42,12 +42,20 @@ def apply_circular_padding(
 
     if not is_image_format:
         # Latent format: (B, C, H, W) - includes FLUX 16-channel
+        width = tensor.shape[3]
+        # Guard against padding >= width
+        if padding >= width:
+            raise ValueError(f"Padding ({padding}) must be less than width ({width})")
         # Pad width dimension (dim 3)
         left_edge = tensor[:, :, :, :padding]
         right_edge = tensor[:, :, :, -padding:]
         padded = torch.cat([right_edge, tensor, left_edge], dim=3)
     else:
         # Image format: (B, H, W, C)
+        width = tensor.shape[2]
+        # Guard against padding >= width
+        if padding >= width:
+            raise ValueError(f"Padding ({padding}) must be less than width ({width})")
         # Pad width dimension (dim 2)
         left_edge = tensor[:, :, :padding, :]
         right_edge = tensor[:, :, -padding:, :]

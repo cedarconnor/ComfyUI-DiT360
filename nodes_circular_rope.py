@@ -183,17 +183,18 @@ class ApplyCircularPanorama:
         for target in targets:
             for name, module in target.named_modules():
                 if isinstance(module, nn.Conv2d):
-                    if hasattr(module, 'padding') and module.padding[0] > 0:
+                    # Get padding values
+                    if isinstance(module.padding, int):
+                        pad_h = pad_w = module.padding
+                    else:
+                        pad_h, pad_w = module.padding
+
+                    # Only patch if there's width padding (we need to make it circular)
+                    if pad_w > 0:
                         try:
-                            # Store original forward
+                            # Store original forward (avoid double-wrapping)
                             if not hasattr(module, '_original_forward'):
                                 module._original_forward = module.forward
-
-                                # Get padding values
-                                if isinstance(module.padding, int):
-                                    pad_h = pad_w = module.padding
-                                else:
-                                    pad_h, pad_w = module.padding
 
                                 # Create custom forward with X-only circular padding
                                 def make_circular_forward(conv_module, orig_forward, pad_h, pad_w):

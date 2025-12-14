@@ -246,9 +246,20 @@ async function open360Viewer(imageDataURL) {
 
     animate();
 
+    // Handle window resize
+    const resizeHandler = () => {
+        if (document.body.contains(modal)) {
+            camera.aspect = canvas.clientWidth / canvas.clientHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(canvas.clientWidth, canvas.clientHeight);
+        }
+    };
+    window.addEventListener("resize", resizeHandler);
+
     // Cleanup function
     function cleanup() {
         cancelAnimationFrame(animationId);
+        window.removeEventListener("resize", resizeHandler);  // Remove resize listener
         renderer.dispose();
         geometry.dispose();
         material.dispose();
@@ -259,16 +270,6 @@ async function open360Viewer(imageDataURL) {
         }
         console.log("✅ 360° viewer closed");
     }
-
-    // Handle window resize
-    const resizeHandler = () => {
-        if (document.body.contains(modal)) {
-            camera.aspect = canvas.clientWidth / canvas.clientHeight;
-            camera.updateProjectionMatrix();
-            renderer.setSize(canvas.clientWidth, canvas.clientHeight);
-        }
-    };
-    window.addEventListener("resize", resizeHandler);
 
     console.log("✅ 360° viewer opened");
 }
