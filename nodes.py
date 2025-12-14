@@ -317,47 +317,25 @@ class Equirect360VAEDecode:
     CATEGORY = "DiT360/vae"
 
     def decode(self, samples, vae, circular_padding):
-        """
-        Decode latent with circular padding
-        """
-
+        """Decode latent with circular padding"""
         latent = samples["samples"]
 
-        # Debug: print input latent shape
-        print(f"[VAE Decode] Input latent shape: {latent.shape}")  # (B, C, H, W)
-
-        # VAE always uses 8x spatial compression
-        # (FLUX has 16 channels but still 8x spatial scale)
+        # VAE uses 8x spatial compression (FLUX has 16 channels but still 8x scale)
         vae_scale = 8
-        print(f"[VAE Decode] Using 8x VAE scale (channels={latent.shape[1]})")
 
         if circular_padding > 0:
-            # Apply padding before decode
             latent_padded = apply_circular_padding(latent, circular_padding)
-            print(f"[VAE Decode] Padded latent shape: {latent_padded.shape}")
-
-            # Decode with VAE
             image_padded = vae.decode(latent_padded)
-            print(f"[VAE Decode] Decoded (padded) shape: {image_padded.shape}")
-
-            # Remove padding using correct scale factor
             padding_pixels = circular_padding * vae_scale
             image = remove_circular_padding(image_padded, padding_pixels)
-
-            print(f"🔄 VAE decoded with circular padding: {circular_padding} latent → {padding_pixels} pixels")
         else:
-            # Standard decode
             image = vae.decode(latent)
-            print("⚠️ VAE decoded without circular padding")
-
-        print(f"[VAE Decode] After padding removal: {image.shape}")
 
         # Ensure ComfyUI format: (B, H, W, C)
-        if image.ndim == 4 and image.shape[1] == 3:  # (B, 3, H, W) → (B, H, W, 3)
+        if image.ndim == 4 and image.shape[1] == 3:
             image = image.permute(0, 2, 3, 1)
-            print(f"[VAE Decode] After permute to BHWC: {image.shape}")
 
-        print(f"✅ Decoded to {image.shape[2]}×{image.shape[1]} panorama")
+        print(f"✅ Decoded {image.shape[2]}×{image.shape[1]} panorama")
 
         return (image,)
 
