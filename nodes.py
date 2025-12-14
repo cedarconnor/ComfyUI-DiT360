@@ -87,9 +87,10 @@ class Equirect360EmptyLatent:
         # Get valid equirectangular dimensions
         width, height = get_equirect_dimensions(width, alignment=16)
 
-        # FLUX uses 16x compression factor, 16 channels
-        latent_width = width // 16
-        latent_height = height // 16
+        # FLUX VAE uses 8x spatial compression, 16 channels
+        # (The 16 is channels, NOT compression factor!)
+        latent_width = width // 8
+        latent_height = height // 8
 
         # Create empty latent (16 channels for FLUX)
         latent = torch.zeros(
@@ -97,7 +98,7 @@ class Equirect360EmptyLatent:
             dtype=torch.float32
         )
 
-        print(f"✅ Created equirectangular latent: {width}×{height} image → {latent_width}×{latent_height} latent (2:1 ratio)")
+        print(f"✅ Created equirectangular latent: {width}×{height} image → {latent_width}×{latent_height} latent (2:1 ratio, 16ch FLUX)")
 
         return ({"samples": latent},)
 
@@ -325,14 +326,10 @@ class Equirect360VAEDecode:
         # Debug: print input latent shape
         print(f"[VAE Decode] Input latent shape: {latent.shape}")  # (B, C, H, W)
 
-        # Detect VAE scale factor (FLUX=16, SDXL/SD=8)
-        # FLUX latents have 16 channels, SD/SDXL have 4
-        if latent.shape[1] == 16:
-            vae_scale = 16  # FLUX
-            print(f"[VAE Decode] Detected FLUX (16 channels) - using 16x scale")
-        else:
-            vae_scale = 8   # SD/SDXL
-            print(f"[VAE Decode] Detected SD/SDXL ({latent.shape[1]} channels) - using 8x scale")
+        # VAE always uses 8x spatial compression
+        # (FLUX has 16 channels but still 8x spatial scale)
+        vae_scale = 8
+        print(f"[VAE Decode] Using 8x VAE scale (channels={latent.shape[1]})")
 
         if circular_padding > 0:
             # Apply padding before decode
