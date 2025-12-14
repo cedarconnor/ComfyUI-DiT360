@@ -322,15 +322,29 @@ class Equirect360VAEDecode:
 
         latent = samples["samples"]
 
+        # Debug: print input latent shape
+        print(f"[VAE Decode] Input latent shape: {latent.shape}")  # (B, C, H, W)
+
+        # Detect VAE scale factor (FLUX=16, SDXL/SD=8)
+        # FLUX latents have 16 channels, SD/SDXL have 4
+        if latent.shape[1] == 16:
+            vae_scale = 16  # FLUX
+            print(f"[VAE Decode] Detected FLUX (16 channels) - using 16x scale")
+        else:
+            vae_scale = 8   # SD/SDXL
+            print(f"[VAE Decode] Detected SD/SDXL ({latent.shape[1]} channels) - using 8x scale")
+
         if circular_padding > 0:
             # Apply padding before decode
             latent_padded = apply_circular_padding(latent, circular_padding)
+            print(f"[VAE Decode] Padded latent shape: {latent_padded.shape}")
 
             # Decode with VAE
             image_padded = vae.decode(latent_padded)
+            print(f"[VAE Decode] Decoded (padded) shape: {image_padded.shape}")
 
-            # Remove padding (16x upscale factor for FLUX VAE)
-            padding_pixels = circular_padding * 8  # VAE upscales 8x
+            # Remove padding using correct scale factor
+            padding_pixels = circular_padding * vae_scale
             image = remove_circular_padding(image_padded, padding_pixels)
 
             print(f"🔄 VAE decoded with circular padding: {circular_padding} latent → {padding_pixels} pixels")
@@ -339,9 +353,12 @@ class Equirect360VAEDecode:
             image = vae.decode(latent)
             print("⚠️ VAE decoded without circular padding")
 
+        print(f"[VAE Decode] After padding removal: {image.shape}")
+
         # Ensure ComfyUI format: (B, H, W, C)
         if image.ndim == 4 and image.shape[1] == 3:  # (B, 3, H, W) → (B, H, W, 3)
             image = image.permute(0, 2, 3, 1)
+            print(f"[VAE Decode] After permute to BHWC: {image.shape}")
 
         print(f"✅ Decoded to {image.shape[2]}×{image.shape[1]} panorama")
 
