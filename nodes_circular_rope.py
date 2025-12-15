@@ -117,18 +117,27 @@ class ApplyCircularRoPE:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
+                "model": ("MODEL", {"tooltip": "Connect your diffusion MODEL (e.g., FLUX UNet + DiT360 LoRA)."}),
             },
             "optional": {
-                "enable": ("BOOLEAN", {"default": True}),
-                "mode": (["shift", "angle"], {"default": "shift"}),
+                "enable": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Toggle the RoPE patch on/off (useful for A/B testing without rewiring). Recommended: OFF unless you are testing attention-level seam handling."
+                }),
+                "mode": (["shift", "angle"], {
+                    "default": "shift",
+                    "tooltip": "RoPE circularization strategy. Recommended: shift (safer for planar-trained models like FLUX). Angle is aggressive/experimental and may degrade results."
+                }),
                 "seam_width": ("INT", {
                     "default": 0,
                     "min": 0,
                     "max": 4096,
-                    "tooltip": "Only for mode='shift': token columns near right edge to wrap (0=auto)"
+                    "tooltip": "Only for mode='shift': token columns near the right edge to wrap. Recommended: 0 (auto) or 4-16. Larger values can distort the image."
                 }),
-                "verbose": ("BOOLEAN", {"default": False}),
+                "verbose": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Print one-time diagnostic info (inferred token width, mode, seam width). Enable for debugging."
+                }),
             }
         }
 
@@ -197,19 +206,31 @@ class ApplyCircularPanorama:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
+                "model": ("MODEL", {"tooltip": "Connect your diffusion MODEL (e.g., FLUX UNet + DiT360 LoRA)."}),
             },
             "optional": {
-                "patch_conv2d": ("BOOLEAN", {"default": True}),
-                "patch_rope": ("BOOLEAN", {"default": True}),
-                "rope_mode": (["shift", "angle"], {"default": "shift"}),
+                "patch_conv2d": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Patch Conv2d layers for X-only circular padding inside the model. For FLUX, this can reduce stability/quality; prefer 360° KSampler/VAE padding or Apply Circular Padding VAE. Enable only if you know you need model-internal padding."
+                }),
+                "patch_rope": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Patch RoPE (attention-level wrap). Recommended: OFF by default; enable only if you are specifically testing RoPE seam handling."
+                }),
+                "rope_mode": (["shift", "angle"], {
+                    "default": "shift",
+                    "tooltip": "RoPE strategy. Recommended: shift. Angle is aggressive/experimental and may degrade results."
+                }),
                 "rope_seam_width": ("INT", {
                     "default": 0,
                     "min": 0,
                     "max": 4096,
-                    "tooltip": "Only for rope_mode='shift': token columns near right edge to wrap (0=auto)"
+                    "tooltip": "Only for rope_mode='shift': token columns near the right edge to wrap. Recommended: 0 (auto) or 4-16. Larger values can distort the image."
                 }),
-                "rope_verbose": ("BOOLEAN", {"default": False}),
+                "rope_verbose": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "Print one-time diagnostic info about the RoPE patch. Enable for debugging."
+                }),
             }
         }
 
@@ -356,14 +377,14 @@ class ApplyCircularPaddingVAE:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "vae": ("VAE",),
+                "vae": ("VAE", {"tooltip": "Connect the VAE to patch (from VAELoader). If used, set 360° VAE Decode circular_padding to 0 to avoid double-padding."}),
                 "inplace": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Modify the loaded VAE (True) or a deep-copied VAE (False). If True, reload VAE to undo."
+                    "tooltip": "Modify the loaded VAE (True) or a deep-copied VAE (False). Recommended: True (faster/less memory). Use False only if you need both patched and unpatched VAEs in one workflow."
                 }),
                 "x_axis_only": ("BOOLEAN", {
                     "default": True,
-                    "tooltip": "Apply circular padding only on X (recommended) or on both X and Y (not recommended for equirectangular)."
+                    "tooltip": "Apply circular padding only on X (recommended for equirectangular) or on both X and Y (generally not recommended)."
                 }),
             }
         }

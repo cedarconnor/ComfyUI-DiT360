@@ -68,12 +68,13 @@ class Equirect360EmptyLatent:
                     "min": 512,
                     "max": 8192,
                     "step": 16,  # FLUX requires 16-pixel alignment
-                    "tooltip": "Width in pixels (height will be automatically calculated as width/2 for 2:1 ratio)"
+                    "tooltip": "Output width in pixels (height auto = width/2 for 2:1). Recommended: 1024 (12GB), 2048 (16GB+), 4096 (24GB+). Must be multiple of 16."
                 }),
                 "batch_size": ("INT", {
                     "default": 1,
                     "min": 1,
-                    "max": 4096
+                    "max": 4096,
+                    "tooltip": "Images per run. Recommended: 1 (VRAM heavy). Increase only if you have enough VRAM for multiple panoramas at once."
                 })
             }
         }
@@ -120,47 +121,73 @@ class Equirect360KSampler:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "model": ("MODEL",),
-                "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
-                "steps": ("INT", {"default": 20, "min": 1, "max": 10000}),
-                "cfg": ("FLOAT", {"default": 3.5, "min": 0.0, "max": 100.0, "step": 0.1}),
-                "sampler_name": (comfy.samplers.KSampler.SAMPLERS,),
-                "scheduler": (comfy.samplers.KSampler.SCHEDULERS,),
-                "positive": ("CONDITIONING",),
-                "negative": ("CONDITIONING",),
-                "latent_image": ("LATENT",),
-                "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "model": ("MODEL", {"tooltip": "Connect your diffusion MODEL (e.g., FLUX UNet + DiT360 LoRA)."}),
+                "seed": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 0xffffffffffffffff,
+                    "tooltip": "Noise seed. Use a fixed value for reproducible results; use randomize/increment to explore variations."
+                }),
+                "steps": ("INT", {
+                    "default": 20,
+                    "min": 1,
+                    "max": 10000,
+                    "tooltip": "Diffusion steps. Recommended: ~20. Increase (30-50) for more detail; decrease for speed."
+                }),
+                "cfg": ("FLOAT", {
+                    "default": 3.5,
+                    "min": 0.0,
+                    "max": 100.0,
+                    "step": 0.1,
+                    "tooltip": "Classifier-free guidance. Recommended: ~3-5 for FLUX. Too high can cause harsh contrast or blown highlights."
+                }),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {
+                    "tooltip": "Sampler algorithm. Recommended: euler. Change only if you know what you prefer."
+                }),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {
+                    "tooltip": "Step scheduler. Recommended: simple (FLUX default)."
+                }),
+                "positive": ("CONDITIONING", {"tooltip": "Positive prompt conditioning."}),
+                "negative": ("CONDITIONING", {"tooltip": "Negative prompt conditioning."}),
+                "latent_image": ("LATENT", {"tooltip": "Starting latent. Use 360° Empty Latent for text2img, or a latent from img2img."}),
+                "denoise": ("FLOAT", {
+                    "default": 1.0,
+                    "min": 0.0,
+                    "max": 1.0,
+                    "step": 0.01,
+                    "tooltip": "Denoise strength. Recommended: 1.0 for text2img; <1.0 for img2img to preserve structure."
+                }),
 
                 # Circular padding
                 "circular_padding": ("INT", {
                     "default": 16,
                     "min": 0,
                     "max": 128,
-                    "tooltip": "Padding width for seamless edges (16-32 recommended, 0 to disable)"
+                    "tooltip": "Latent-space circular padding on X for seam reduction. Recommended: start at 0; if seam, try 8-16 (up to 32). Higher values cost VRAM/time."
                 }),
 
                 # Optional geometric losses
                 "enable_yaw_loss": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Enable rotational consistency loss (slower, better quality)"
+                    "tooltip": "Yaw-rotation consistency loss during sampling. Use if the panorama changes noticeably when yaw-rotated; ~2x slower."
                 }),
                 "yaw_loss_weight": ("FLOAT", {
                     "default": 0.1,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
-                    "tooltip": "Yaw loss strength (0.05-0.2 recommended)"
+                    "tooltip": "Yaw loss strength. Recommended: 0.05-0.2. Higher values can over-constrain and reduce detail."
                 }),
                 "enable_cube_loss": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "Enable pole distortion reduction loss (slower, reduces pole artifacts)"
+                    "tooltip": "Pole distortion reduction via cubemap reprojection loss. Use if poles look smeared/warped; ~1.5x slower."
                 }),
                 "cube_loss_weight": ("FLOAT", {
                     "default": 0.1,
                     "min": 0.0,
                     "max": 1.0,
                     "step": 0.01,
-                    "tooltip": "Cube loss strength (0.05-0.2 recommended)"
+                    "tooltip": "Cube loss strength. Recommended: 0.05-0.2. Increase slowly if poles still look distorted."
                 }),
             }
         }
@@ -304,13 +331,13 @@ class Equirect360VAEDecode:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "samples": ("LATENT",),
-                "vae": ("VAE",),
+                "samples": ("LATENT", {"tooltip": "Latent samples to decode (from 360° KSampler)."}),
+                "vae": ("VAE", {"tooltip": "VAE used to decode latents into images (must match your model)."}),
                 "circular_padding": ("INT", {
                     "default": 16,
                     "min": 0,
                     "max": 128,
-                    "tooltip": "VAE decode padding (16 recommended, 0 to disable)"
+                    "tooltip": "Latent-space padding applied during VAE decode. Recommended: 0 (baseline) or 8-16 if you see a seam after decode. Set to 0 when using Apply Circular Padding VAE."
                 })
             }
         }
@@ -359,16 +386,16 @@ class Equirect360EdgeBlender:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "image": ("IMAGE",),
+                "image": ("IMAGE", {"tooltip": "Panorama image to blend (2:1 equirectangular)."}),
                 "blend_width": ("INT", {
                     "default": 10,
                     "min": 0,
                     "max": 200,
-                    "tooltip": "Blend region width in pixels (10-20 recommended)"
+                    "tooltip": "Blend width in output pixels. Recommended: 10-20; increase (20-40) for stubborn seams; 0 disables."
                 }),
                 "blend_mode": (["cosine", "linear", "smooth"], {
                     "default": "cosine",
-                    "tooltip": "Blending curve (cosine is smoothest)"
+                    "tooltip": "Blend curve. Recommended: cosine (smoothest). Use linear for a harder blend, smooth for a gentler transition."
                 })
             }
         }
@@ -412,13 +439,13 @@ class Equirect360Viewer:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "images": ("IMAGE",),
+                "images": ("IMAGE", {"tooltip": "Panorama image(s) to preview in the 360° viewer."}),
                 "max_resolution": ("INT", {
                     "default": 4096,
                     "min": 512,
                     "max": 8192,
                     "step": 16,
-                    "tooltip": "Max width for preview (lower = faster loading)"
+                    "tooltip": "Max preview width. Recommended: 2048 for speed, 4096 for detail. Only affects the preview temp file (does not change saved output)."
                 })
             }
         }
