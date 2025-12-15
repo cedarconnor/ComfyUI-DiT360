@@ -1,0 +1,277 @@
+{
+  "id": "b4e5c2da-9f44-4da6-9f8c-6c4a5b06d003",
+  "revision": 0,
+  "last_node_id": 15,
+  "last_link_id": 13,
+  "nodes": [
+    {
+      "id": 14,
+      "type": "Note",
+      "pos": [250, 80],
+      "size": [580, 260],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "DiT360 / FLUX - VAE Conv2d Circular Padding (X-only)\\n\\nGoal: reduce seam introduced during VAE decode, without changing the diffusion sampling.\\n\\nHow it works:\\n- ApplyCircularPaddingVAE patches Conv2d layers inside your loaded VAE to use circular padding on X (width) and zero padding on Y.\\n\\nImportant:\\n- If you use ApplyCircularPaddingVAE, set Equirect360VAEDecode.circular_padding = 0 (avoid double-padding).\\n- Start with Equirect360KSampler.circular_padding = 0 (add later only if needed)."
+      ],
+      "color": "#263",
+      "bgcolor": "#385"
+    },
+    {
+      "id": 15,
+      "type": "Note",
+      "pos": [250, 360],
+      "size": [580, 220],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "If you still see a seam:\\n- Increase EdgeBlender.blend_width (10-40).\\n- Optionally add small KSampler circular padding (8-16).\\n\\nIf output quality drops:\\n- Keep KSampler circular_padding at 0.\\n- Prefer full FLUX dev over fp8."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [900, 120],
+      "size": [270, 82],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "MODEL", "type": "MODEL", "slot_index": 0, "links": [1] }
+      ],
+      "properties": { "Node name for S&R": "UNETLoader" },
+      "widgets_values": ["flux1-dev.safetensors", "default"]
+    },
+    {
+      "id": 2,
+      "type": "LoraLoaderModelOnly",
+      "pos": [1230, 120],
+      "size": [270, 82],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 1 }
+      ],
+      "outputs": [
+        { "name": "MODEL", "type": "MODEL", "slot_index": 0, "links": [2] }
+      ],
+      "properties": { "Node name for S&R": "LoraLoaderModelOnly" },
+      "widgets_values": ["DiT360_LoRA.safetensors", 1.0]
+    },
+    {
+      "id": 3,
+      "type": "DualCLIPLoader",
+      "pos": [900, 260],
+      "size": [270, 130],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "CLIP", "type": "CLIP", "slot_index": 0, "links": [3, 4] }
+      ],
+      "properties": { "Node name for S&R": "DualCLIPLoader" },
+      "widgets_values": ["clip_l.safetensors", "t5xxl_fp16.safetensors", "flux", "default"]
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [1230, 260],
+      "size": [430, 170],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        { "name": "clip", "type": "CLIP", "link": 3 }
+      ],
+      "outputs": [
+        { "name": "CONDITIONING", "type": "CONDITIONING", "slot_index": 0, "links": [5] }
+      ],
+      "properties": { "Node name for S&R": "CLIPTextEncode" },
+      "widgets_values": ["A beautiful tropical beach at sunset, palm trees, golden hour, seamless 360 degree equirectangular panorama, photorealistic"]
+    },
+    {
+      "id": 5,
+      "type": "CLIPTextEncode",
+      "pos": [1230, 460],
+      "size": [430, 170],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        { "name": "clip", "type": "CLIP", "link": 4 }
+      ],
+      "outputs": [
+        { "name": "CONDITIONING", "type": "CONDITIONING", "slot_index": 0, "links": [6] }
+      ],
+      "properties": { "Node name for S&R": "CLIPTextEncode" },
+      "widgets_values": ["blurry, low quality, distorted, watermark, text"]
+    },
+    {
+      "id": 6,
+      "type": "VAELoader",
+      "pos": [1230, 660],
+      "size": [270, 58],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "VAE", "type": "VAE", "slot_index": 0, "links": [9] }
+      ],
+      "properties": { "Node name for S&R": "VAELoader" },
+      "widgets_values": ["ae.safetensors"]
+    },
+    {
+      "id": 7,
+      "type": "ApplyCircularPaddingVAE",
+      "pos": [1550, 660],
+      "size": [315, 86],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [
+        { "name": "vae", "type": "VAE", "link": 9 }
+      ],
+      "outputs": [
+        { "name": "VAE", "type": "VAE", "slot_index": 0, "links": [10] }
+      ],
+      "properties": { "Node name for S&R": "ApplyCircularPaddingVAE" },
+      "widgets_values": [true, true]
+    },
+    {
+      "id": 8,
+      "type": "Equirect360EmptyLatent",
+      "pos": [1700, 260],
+      "size": [315, 106],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "LATENT", "type": "LATENT", "slot_index": 0, "links": [7] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360EmptyLatent" },
+      "widgets_values": [2048, 1]
+    },
+    {
+      "id": 9,
+      "type": "Equirect360KSampler",
+      "pos": [2050, 240],
+      "size": [315, 474],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 2 },
+        { "name": "positive", "type": "CONDITIONING", "link": 5 },
+        { "name": "negative", "type": "CONDITIONING", "link": 6 },
+        { "name": "latent_image", "type": "LATENT", "link": 7 }
+      ],
+      "outputs": [
+        { "name": "LATENT", "type": "LATENT", "slot_index": 0, "links": [8] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360KSampler" },
+      "widgets_values": [0, "randomize", 20, 3.5, "euler", "simple", 1.0, 0, false, 0.1, false, 0.1]
+    },
+    {
+      "id": 10,
+      "type": "Equirect360VAEDecode",
+      "pos": [2420, 260],
+      "size": [315, 106],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        { "name": "samples", "type": "LATENT", "link": 8 },
+        { "name": "vae", "type": "VAE", "link": 10 }
+      ],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": [11] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360VAEDecode" },
+      "widgets_values": [0]
+    },
+    {
+      "id": 11,
+      "type": "Equirect360EdgeBlender",
+      "pos": [2770, 260],
+      "size": [315, 106],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": 11 }
+      ],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": [12, 13] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360EdgeBlender" },
+      "widgets_values": [20, "cosine"]
+    },
+    {
+      "id": 12,
+      "type": "Equirect360Viewer",
+      "pos": [3120, 180],
+      "size": [315, 270],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 12 }
+      ],
+      "outputs": [],
+      "properties": { "Node name for S&R": "Equirect360Viewer" },
+      "widgets_values": [4096]
+    },
+    {
+      "id": 13,
+      "type": "SaveImage",
+      "pos": [3120, 500],
+      "size": [315, 270],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 13 }
+      ],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": ["dit360_03_vae_circ"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "MODEL"],
+    [2, 2, 0, 9, 0, "MODEL"],
+    [3, 3, 0, 4, 0, "CLIP"],
+    [4, 3, 0, 5, 0, "CLIP"],
+    [5, 4, 0, 9, 1, "CONDITIONING"],
+    [6, 5, 0, 9, 2, "CONDITIONING"],
+    [7, 8, 0, 9, 3, "LATENT"],
+    [8, 9, 0, 10, 0, "LATENT"],
+    [9, 6, 0, 7, 0, "VAE"],
+    [10, 7, 0, 10, 1, "VAE"],
+    [11, 10, 0, 11, 0, "IMAGE"],
+    [12, 11, 0, 12, 0, "IMAGE"],
+    [13, 11, 0, 13, 0, "IMAGE"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.33.14",
+    "workflowRendererVersion": "LG"
+  },
+  "version": 0.4
+}

@@ -275,7 +275,13 @@ class CircularRoPEEmbedding(nn.Module):
         return self.get_freqs(height, width, ids.device, ids.dtype)
 
 
-def create_circular_rope_wrapper(original_embedder: nn.Module, circular_axis: int = -1):
+def create_circular_rope_wrapper(
+    original_embedder: nn.Module,
+    circular_axis: int = -1,
+    mode: str = "shift",
+    seam_width: Optional[int] = None,
+    verbose: bool = False,
+):
     """
     Wrap an existing RoPE embedder to use circular positions in one axis.
 
@@ -285,6 +291,15 @@ def create_circular_rope_wrapper(original_embedder: nn.Module, circular_axis: in
     Args:
         original_embedder: The model's original position embedder
         circular_axis: Which spatial axis is circular (default: -1 = X/width)
+        mode: Strategy used to make the axis circular:
+            - "shift": Wrap only a seam band at the right edge by shifting it
+              negative (x -> x - W). This keeps most positions unchanged and is
+              generally less disruptive for planar-trained models (e.g., FLUX).
+            - "angle": Map x positions to radians on a circle (x -> 2*pi*x/W).
+              This is more aggressive and can harm some base models.
+        seam_width: Only used when mode="shift". Width (in token columns) of the
+            right-edge band to wrap. Defaults to W//8 (clamped to [1, W-1]).
+        verbose: Print a one-time diagnostic on first forward call.
 
     Returns:
         Wrapped embedder that produces circular RoPE
@@ -303,19 +318,51 @@ def create_circular_rope_wrapper(original_embedder: nn.Module, circular_axis: in
 
         axis_idx = circular_axis if circular_axis >= 0 else n_axes + circular_axis
 
-        # Clone and convert to float for angle computation
-        ids_mod = ids.clone().float()
+        # Work in float32 for stable trigonometry, but preserve the original
+        # floating dtype (fp16/bf16) when calling the underlying embedder.
+        forward_dtype = ids.dtype if torch.is_floating_point(ids) else torch.float32
+        ids_mod = ids.clone().to(dtype=torch.float32)
 
-        # Get width from max position (assumes positions are 0..W-1)
-        width = float(ids_mod[..., axis_idx].max().item() + 1.0)
+        # Compute the token-span along the selected axis.
+        # Assumes a regular grid, typically 0..W-1 (or an affine shift thereof).
+        axis_vals = ids_mod[..., axis_idx]
+        axis_min = float(axis_vals.min().item())
+        axis_rel = axis_vals - axis_min
+        width = float(axis_rel.max().item() + 1.0)
 
-        if width > 1.0:
-            # Scale positions to angles: θ = 2π * x / W
-            # This makes position 0 and W-1 adjacent on the circle
-            # RoPE naturally handles the periodicity at 2π
-            ids_mod[..., axis_idx] = ids_mod[..., axis_idx] * (2.0 * math.pi / width)
+        if width <= 1.0:
+            return original_forward(ids, *args, **kwargs)
 
-        return original_forward(ids_mod, *args, **kwargs)
+        selected_mode = (mode or "shift").lower()
+        wrap = None
+
+        if selected_mode == "angle":
+            # Map positions to radians around a circle.
+            # NOTE: This changes the absolute scale of the axis significantly.
+            ids_mod[..., axis_idx] = axis_rel * (2.0 * math.pi / width)
+        elif selected_mode == "shift":
+            # Wrap only a narrow band at the seam (right edge) by shifting it negative.
+            wrap = seam_width
+            if wrap is None:
+                wrap = int(max(1.0, math.floor(width / 8.0)))
+            wrap = int(max(1, min(wrap, int(width - 1))))
+
+            cutoff = width - float(wrap)
+            axis_wrapped = axis_rel.clone()
+            axis_wrapped[axis_wrapped >= cutoff] -= width
+            ids_mod[..., axis_idx] = axis_wrapped
+        else:
+            # Unknown mode -> no-op (safer than raising inside sampling).
+            return original_forward(ids, *args, **kwargs)
+
+        if verbose and not getattr(circular_forward, "_dit360_logged", False):
+            setattr(circular_forward, "_dit360_logged", True)
+            msg = f"[CircularRoPE] mode={selected_mode} axis={axis_idx} width={int(width)}"
+            if selected_mode == "shift" and wrap is not None:
+                msg += f" seam_width={wrap}"
+            print(msg)
+
+        return original_forward(ids_mod.to(dtype=forward_dtype), *args, **kwargs)
 
     class CircularWrapper(nn.Module):
         def __init__(self, orig):

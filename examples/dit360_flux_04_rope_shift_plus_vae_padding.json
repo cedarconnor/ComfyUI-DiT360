@@ -1,0 +1,295 @@
+{
+  "id": "3c1b1b6d-4e5a-4cc1-b6c0-4d0edba6d004",
+  "revision": 0,
+  "last_node_id": 16,
+  "last_link_id": 14,
+  "nodes": [
+    {
+      "id": 15,
+      "type": "Note",
+      "pos": [250, 80],
+      "size": [640, 280],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "DiT360 / FLUX - RoPE (shift) + VAE Circular Padding\\n\\nGoal: experiment with RoPE seam handling (attention-level) while keeping sampling padding low/zero.\\n\\nRecommended starting settings:\\n- ApplyCircularPanorama: patch_conv2d=false, patch_rope=true, rope_mode=shift, rope_seam_width=0 (auto).\\n- ApplyCircularPaddingVAE: inplace=true, x_axis_only=true.\\n- Equirect360KSampler.circular_padding=0 and Equirect360VAEDecode.circular_padding=0.\\n\\nIf results look washed out / broken:\\n- Turn patch_rope OFF first, or keep rope_mode=shift and set rope_seam_width to a small value (4-16).\\n- Avoid rope_mode=angle unless you are testing."
+      ],
+      "color": "#263",
+      "bgcolor": "#385"
+    },
+    {
+      "id": 16,
+      "type": "Note",
+      "pos": [250, 380],
+      "size": [640, 220],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "Model stability tips:\\n- Prefer full FLUX dev over fp8 when using RoPE/patches.\\n- If you still see a seam, increase EdgeBlender.blend_width (10-40).\\n- Only add KSampler circular_padding (8-16) as a last step."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [900, 120],
+      "size": [270, 82],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "MODEL", "type": "MODEL", "slot_index": 0, "links": [1] }
+      ],
+      "properties": { "Node name for S&R": "UNETLoader" },
+      "widgets_values": ["flux1-dev.safetensors", "default"]
+    },
+    {
+      "id": 2,
+      "type": "LoraLoaderModelOnly",
+      "pos": [1230, 120],
+      "size": [270, 82],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 1 }
+      ],
+      "outputs": [
+        { "name": "MODEL", "type": "MODEL", "slot_index": 0, "links": [2] }
+      ],
+      "properties": { "Node name for S&R": "LoraLoaderModelOnly" },
+      "widgets_values": ["DiT360_LoRA.safetensors", 1.0]
+    },
+    {
+      "id": 3,
+      "type": "ApplyCircularPanorama",
+      "pos": [1550, 120],
+      "size": [330, 130],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 2 }
+      ],
+      "outputs": [
+        { "name": "model", "type": "MODEL", "slot_index": 0, "links": [3] }
+      ],
+      "properties": { "Node name for S&R": "ApplyCircularPanorama" },
+      "widgets_values": [false, true, "shift", 0, false]
+    },
+    {
+      "id": 4,
+      "type": "DualCLIPLoader",
+      "pos": [900, 260],
+      "size": [270, 130],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "CLIP", "type": "CLIP", "slot_index": 0, "links": [4, 5] }
+      ],
+      "properties": { "Node name for S&R": "DualCLIPLoader" },
+      "widgets_values": ["clip_l.safetensors", "t5xxl_fp16.safetensors", "flux", "default"]
+    },
+    {
+      "id": 5,
+      "type": "CLIPTextEncode",
+      "pos": [1230, 260],
+      "size": [430, 170],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        { "name": "clip", "type": "CLIP", "link": 4 }
+      ],
+      "outputs": [
+        { "name": "CONDITIONING", "type": "CONDITIONING", "slot_index": 0, "links": [6] }
+      ],
+      "properties": { "Node name for S&R": "CLIPTextEncode" },
+      "widgets_values": ["A beautiful tropical beach at sunset, palm trees, golden hour, seamless 360 degree equirectangular panorama, photorealistic"]
+    },
+    {
+      "id": 6,
+      "type": "CLIPTextEncode",
+      "pos": [1230, 460],
+      "size": [430, 170],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        { "name": "clip", "type": "CLIP", "link": 5 }
+      ],
+      "outputs": [
+        { "name": "CONDITIONING", "type": "CONDITIONING", "slot_index": 0, "links": [7] }
+      ],
+      "properties": { "Node name for S&R": "CLIPTextEncode" },
+      "widgets_values": ["blurry, low quality, distorted, watermark, text"]
+    },
+    {
+      "id": 7,
+      "type": "VAELoader",
+      "pos": [1230, 660],
+      "size": [270, 58],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "VAE", "type": "VAE", "slot_index": 0, "links": [10] }
+      ],
+      "properties": { "Node name for S&R": "VAELoader" },
+      "widgets_values": ["ae.safetensors"]
+    },
+    {
+      "id": 8,
+      "type": "ApplyCircularPaddingVAE",
+      "pos": [1550, 660],
+      "size": [315, 86],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        { "name": "vae", "type": "VAE", "link": 10 }
+      ],
+      "outputs": [
+        { "name": "VAE", "type": "VAE", "slot_index": 0, "links": [11] }
+      ],
+      "properties": { "Node name for S&R": "ApplyCircularPaddingVAE" },
+      "widgets_values": [true, true]
+    },
+    {
+      "id": 9,
+      "type": "Equirect360EmptyLatent",
+      "pos": [1700, 260],
+      "size": [315, 106],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "LATENT", "type": "LATENT", "slot_index": 0, "links": [8] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360EmptyLatent" },
+      "widgets_values": [2048, 1]
+    },
+    {
+      "id": 10,
+      "type": "Equirect360KSampler",
+      "pos": [2050, 240],
+      "size": [315, 474],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 3 },
+        { "name": "positive", "type": "CONDITIONING", "link": 6 },
+        { "name": "negative", "type": "CONDITIONING", "link": 7 },
+        { "name": "latent_image", "type": "LATENT", "link": 8 }
+      ],
+      "outputs": [
+        { "name": "LATENT", "type": "LATENT", "slot_index": 0, "links": [9] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360KSampler" },
+      "widgets_values": [0, "randomize", 20, 3.5, "euler", "simple", 1.0, 0, false, 0.1, false, 0.1]
+    },
+    {
+      "id": 11,
+      "type": "Equirect360VAEDecode",
+      "pos": [2420, 260],
+      "size": [315, 106],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        { "name": "samples", "type": "LATENT", "link": 9 },
+        { "name": "vae", "type": "VAE", "link": 11 }
+      ],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": [12] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360VAEDecode" },
+      "widgets_values": [0]
+    },
+    {
+      "id": 12,
+      "type": "Equirect360EdgeBlender",
+      "pos": [2770, 260],
+      "size": [315, 106],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": 12 }
+      ],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": [13, 14] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360EdgeBlender" },
+      "widgets_values": [20, "cosine"]
+    },
+    {
+      "id": 13,
+      "type": "Equirect360Viewer",
+      "pos": [3120, 180],
+      "size": [315, 270],
+      "flags": {},
+      "order": 14,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 13 }
+      ],
+      "outputs": [],
+      "properties": { "Node name for S&R": "Equirect360Viewer" },
+      "widgets_values": [4096]
+    },
+    {
+      "id": 14,
+      "type": "SaveImage",
+      "pos": [3120, 500],
+      "size": [315, 270],
+      "flags": {},
+      "order": 15,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 14 }
+      ],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": ["dit360_04_rope_shift"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "MODEL"],
+    [2, 2, 0, 3, 0, "MODEL"],
+    [3, 3, 0, 10, 0, "MODEL"],
+    [4, 4, 0, 5, 0, "CLIP"],
+    [5, 4, 0, 6, 0, "CLIP"],
+    [6, 5, 0, 10, 1, "CONDITIONING"],
+    [7, 6, 0, 10, 2, "CONDITIONING"],
+    [8, 9, 0, 10, 3, "LATENT"],
+    [9, 10, 0, 11, 0, "LATENT"],
+    [10, 7, 0, 8, 0, "VAE"],
+    [11, 8, 0, 11, 1, "VAE"],
+    [12, 11, 0, 12, 0, "IMAGE"],
+    [13, 12, 0, 13, 0, "IMAGE"],
+    [14, 12, 0, 14, 0, "IMAGE"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.33.14",
+    "workflowRendererVersion": "LG"
+  },
+  "version": 0.4
+}

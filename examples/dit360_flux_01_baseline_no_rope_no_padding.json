@@ -1,0 +1,259 @@
+{
+  "id": "f0c4f4b5-0e39-4a1d-9f1a-6c7f5c9e9c01",
+  "revision": 0,
+  "last_node_id": 14,
+  "last_link_id": 12,
+  "nodes": [
+    {
+      "id": 13,
+      "type": "Note",
+      "pos": [250, 80],
+      "size": [520, 220],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "DiT360 / FLUX - Baseline (no RoPE, no circular padding)\\n\\nGoal: maximum image stability/quality. Seam is handled only by optional edge blending.\\n\\nWhat to change:\\n- UNETLoader: set your FLUX model file (fp8 vs full).\\n- LoraLoaderModelOnly: set your DiT360 LoRA file + strength.\\n- VAELoader: set your VAE file.\\n- Prompts + seed/steps/cfg.\\n\\nTips:\\n- Start with Equirect360KSampler.circular_padding = 0 and Equirect360VAEDecode.circular_padding = 0.\\n- If you see a seam, increase EdgeBlender.blend_width (10-40)."
+      ],
+      "color": "#263",
+      "bgcolor": "#385"
+    },
+    {
+      "id": 14,
+      "type": "Note",
+      "pos": [250, 320],
+      "size": [520, 180],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "If output gets washed out or collapses:\\n- Prefer full FLUX dev over fp8.\\n- Keep RoPE OFF for this workflow.\\n- Keep circular padding at 0, then add only one fix at a time (EdgeBlender, then KSampler padding, then VAE padding)."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 1,
+      "type": "UNETLoader",
+      "pos": [900, 120],
+      "size": [270, 82],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "MODEL", "type": "MODEL", "slot_index": 0, "links": [1] }
+      ],
+      "properties": { "Node name for S&R": "UNETLoader" },
+      "widgets_values": ["flux1-dev.safetensors", "default"]
+    },
+    {
+      "id": 2,
+      "type": "LoraLoaderModelOnly",
+      "pos": [1230, 120],
+      "size": [270, 82],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 1 }
+      ],
+      "outputs": [
+        { "name": "MODEL", "type": "MODEL", "slot_index": 0, "links": [2] }
+      ],
+      "properties": { "Node name for S&R": "LoraLoaderModelOnly" },
+      "widgets_values": ["DiT360_LoRA.safetensors", 1.0]
+    },
+    {
+      "id": 3,
+      "type": "DualCLIPLoader",
+      "pos": [900, 260],
+      "size": [270, 130],
+      "flags": {},
+      "order": 4,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "CLIP", "type": "CLIP", "slot_index": 0, "links": [3, 4] }
+      ],
+      "properties": { "Node name for S&R": "DualCLIPLoader" },
+      "widgets_values": ["clip_l.safetensors", "t5xxl_fp16.safetensors", "flux", "default"]
+    },
+    {
+      "id": 4,
+      "type": "CLIPTextEncode",
+      "pos": [1230, 260],
+      "size": [430, 170],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        { "name": "clip", "type": "CLIP", "link": 3 }
+      ],
+      "outputs": [
+        { "name": "CONDITIONING", "type": "CONDITIONING", "slot_index": 0, "links": [5] }
+      ],
+      "properties": { "Node name for S&R": "CLIPTextEncode" },
+      "widgets_values": ["A beautiful tropical beach at sunset, palm trees, golden hour, 360 degree equirectangular panorama, photorealistic"]
+    },
+    {
+      "id": 5,
+      "type": "CLIPTextEncode",
+      "pos": [1230, 460],
+      "size": [430, 170],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        { "name": "clip", "type": "CLIP", "link": 4 }
+      ],
+      "outputs": [
+        { "name": "CONDITIONING", "type": "CONDITIONING", "slot_index": 0, "links": [6] }
+      ],
+      "properties": { "Node name for S&R": "CLIPTextEncode" },
+      "widgets_values": ["blurry, low quality, distorted, watermark, text, fisheye, dual fisheye, stitched panorama"]
+    },
+    {
+      "id": 6,
+      "type": "VAELoader",
+      "pos": [1230, 660],
+      "size": [270, 58],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "VAE", "type": "VAE", "slot_index": 0, "links": [9] }
+      ],
+      "properties": { "Node name for S&R": "VAELoader" },
+      "widgets_values": ["ae.safetensors"]
+    },
+    {
+      "id": 7,
+      "type": "Equirect360EmptyLatent",
+      "pos": [1700, 260],
+      "size": [315, 106],
+      "flags": {},
+      "order": 8,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        { "name": "LATENT", "type": "LATENT", "slot_index": 0, "links": [7] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360EmptyLatent" },
+      "widgets_values": [2048, 1]
+    },
+    {
+      "id": 8,
+      "type": "Equirect360KSampler",
+      "pos": [2050, 240],
+      "size": [315, 474],
+      "flags": {},
+      "order": 9,
+      "mode": 0,
+      "inputs": [
+        { "name": "model", "type": "MODEL", "link": 2 },
+        { "name": "positive", "type": "CONDITIONING", "link": 5 },
+        { "name": "negative", "type": "CONDITIONING", "link": 6 },
+        { "name": "latent_image", "type": "LATENT", "link": 7 }
+      ],
+      "outputs": [
+        { "name": "LATENT", "type": "LATENT", "slot_index": 0, "links": [8] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360KSampler" },
+      "widgets_values": [0, "randomize", 20, 3.5, "euler", "simple", 1.0, 0, false, 0.1, false, 0.1]
+    },
+    {
+      "id": 9,
+      "type": "Equirect360VAEDecode",
+      "pos": [2420, 260],
+      "size": [315, 106],
+      "flags": {},
+      "order": 10,
+      "mode": 0,
+      "inputs": [
+        { "name": "samples", "type": "LATENT", "link": 8 },
+        { "name": "vae", "type": "VAE", "link": 9 }
+      ],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": [10] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360VAEDecode" },
+      "widgets_values": [0]
+    },
+    {
+      "id": 10,
+      "type": "Equirect360EdgeBlender",
+      "pos": [2770, 260],
+      "size": [315, 106],
+      "flags": {},
+      "order": 11,
+      "mode": 0,
+      "inputs": [
+        { "name": "image", "type": "IMAGE", "link": 10 }
+      ],
+      "outputs": [
+        { "name": "IMAGE", "type": "IMAGE", "slot_index": 0, "links": [11, 12] }
+      ],
+      "properties": { "Node name for S&R": "Equirect360EdgeBlender" },
+      "widgets_values": [10, "cosine"]
+    },
+    {
+      "id": 11,
+      "type": "Equirect360Viewer",
+      "pos": [3120, 180],
+      "size": [315, 270],
+      "flags": {},
+      "order": 12,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 11 }
+      ],
+      "outputs": [],
+      "properties": { "Node name for S&R": "Equirect360Viewer" },
+      "widgets_values": [4096]
+    },
+    {
+      "id": 12,
+      "type": "SaveImage",
+      "pos": [3120, 500],
+      "size": [315, 270],
+      "flags": {},
+      "order": 13,
+      "mode": 0,
+      "inputs": [
+        { "name": "images", "type": "IMAGE", "link": 12 }
+      ],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": ["dit360_01_baseline"]
+    }
+  ],
+  "links": [
+    [1, 1, 0, 2, 0, "MODEL"],
+    [2, 2, 0, 8, 0, "MODEL"],
+    [3, 3, 0, 4, 0, "CLIP"],
+    [4, 3, 0, 5, 0, "CLIP"],
+    [5, 4, 0, 8, 1, "CONDITIONING"],
+    [6, 5, 0, 8, 2, "CONDITIONING"],
+    [7, 7, 0, 8, 3, "LATENT"],
+    [8, 8, 0, 9, 0, "LATENT"],
+    [9, 6, 0, 9, 1, "VAE"],
+    [10, 9, 0, 10, 0, "IMAGE"],
+    [11, 10, 0, 11, 0, "IMAGE"],
+    [12, 10, 0, 12, 0, "IMAGE"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "frontendVersion": "1.33.14",
+    "workflowRendererVersion": "LG"
+  },
+  "version": 0.4
+}

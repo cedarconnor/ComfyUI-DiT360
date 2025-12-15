@@ -72,7 +72,12 @@ You should see: `✅ ComfyUI-DiT360 v2.0.0 loaded`
 9. **Save Image** → Standard save *(standard node)*
 
 ### Example Workflow
-See `examples/basic_workflow.json` *(coming soon)*
+Load any of these JSONs in ComfyUI and update the model/LoRA/VAE filenames to match your setup:
+
+- `examples/dit360_flux_01_baseline_no_rope_no_padding.json` (stable baseline; seam via EdgeBlender)
+- `examples/dit360_flux_02_ksampler_and_vae_padding.json` (uses sampler + decode circular padding)
+- `examples/dit360_flux_03_vae_conv2d_circular_padding.json` (uses Apply Circular Padding VAE; set VAEDecode padding to 0)
+- `examples/dit360_flux_04_rope_shift_plus_vae_padding.json` (experimental RoPE `shift` + VAE circular padding)
 
 ---
 
@@ -105,10 +110,34 @@ Post-processing to ensure perfect wraparound.
 - **Inputs**: Image, blend_width (10-20 px), blend_mode (cosine/linear/smooth)
 - **Highly recommended** for best results!
 
-### 5. Equirect360Viewer *(coming soon)*
-Interactive Three.js viewer for 360° navigation.
-- **Input**: Image
-- **Features**: Mouse drag, scroll zoom, fullscreen
+### 5. Equirect360Viewer
+Interactive Three.js viewer for 360° navigation inside ComfyUI.
+ - **Input**: Image
+ - **Features**: Mouse drag, scroll zoom, fullscreen
+
+**Viewer dependency**: If the 360° viewer button does nothing, install Three.js locally:
+- Run `python install.py` in this repo (downloads into `web/js/lib`), then restart ComfyUI
+
+---
+
+## 🌀 Optional: Circular RoPE (Experimental)
+
+These nodes patch a model’s **Rotary Position Embeddings (RoPE)** so the panorama wraps horizontally at the **attention** level (not just padding/blending). Results are model-dependent and still experimental.
+
+### Apply Circular RoPE
+- **mode**:
+  - `shift` (default): wraps only a seam band near the right edge (safer for planar-trained models like FLUX)
+  - `angle`: maps X positions to a circle in radians (more aggressive)
+- **seam_width**: token columns near the right edge to wrap (`0` = auto)
+
+### Apply Circular Panorama (All-in-One)
+Applies both:
+- **Conv2d X-only circular padding** (where applicable)
+- **Circular RoPE** (same options as above)
+
+### Apply Circular Padding VAE
+Patches the **VAE Conv2d** layers to use X-only circular padding (helps reduce seam after decode).
+- If you use this, set `Equirect360VAEDecode.circular_padding` to `0` to avoid “double padding”.
 
 ---
 
@@ -168,6 +197,12 @@ warm lighting from chandeliers, dusty atmosphere, 360 degree view"
 - **Check**: DiT360 LoRA is loaded and strength = 1.0
 - **Check**: `circular_padding` > 0
 - **Check**: Using Equirect360EdgeBlender
+
+### Washed Out / Broken Output (RoPE)
+- **Solution**: Prefer full FLUX dev over fp8 when testing RoPE
+- **Solution**: Use `rope_mode=shift` (start with `rope_seam_width=0` or 4-16)
+- **Solution**: Turn `patch_rope` OFF first and rely on padding + EdgeBlender
+- **Check**: Avoid double padding (if using Apply Circular Padding VAE, set VAEDecode padding to 0)
 
 ---
 

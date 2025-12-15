@@ -5,16 +5,18 @@
  * panoramic images using Three.js for interactive 360° navigation.
  */
 
-import { app } from "../../scripts/app.js";
+import { app } from "../../../scripts/app.js";
 
-// Three.js CDN URL
-const THREE_JS_URL = "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js";
+// Try local Three.js first (recommended), then fall back to CDN.
+// Local files can be installed via `python install.py` in this repo.
+const THREE_LOCAL_URL = new URL("./lib/three.module.min.js", import.meta.url).href;
+const THREE_CDN_URL = "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.172.0/three.module.min.js";
 
 let THREE = null;
 let isThreeJSLoaded = false;
 
 /**
- * Load Three.js dynamically from CDN
+ * Load Three.js dynamically (local preferred)
  */
 async function loadThreeJS() {
     if (isThreeJSLoaded && THREE) {
@@ -22,13 +24,24 @@ async function loadThreeJS() {
     }
 
     try {
-        THREE = await import(THREE_JS_URL);
+        try {
+            THREE = await import(THREE_LOCAL_URL);
+        } catch (localError) {
+            // Local file missing or blocked -> try CDN.
+            THREE = await import(THREE_CDN_URL);
+        }
         isThreeJSLoaded = true;
         console.log("✅ Three.js loaded successfully for 360° viewer");
         return THREE;
     } catch (error) {
         console.error("❌ Failed to load Three.js:", error);
-        alert("Failed to load Three.js for 360° viewer. Check your internet connection.");
+        alert(
+            "Failed to load Three.js for the 360° viewer.\n\n" +
+            "Fix options:\n" +
+            "1) Run `python install.py` in `ComfyUI-DiT360` to download local Three.js files into `web/js/lib`.\n" +
+            "2) Or manually place `three.module.min.js` and `three.core.min.js` into `web/js/lib`.\n" +
+            "3) If you rely on CDN, ensure your browser/ComfyUI allows external module imports."
+        );
         return null;
     }
 }

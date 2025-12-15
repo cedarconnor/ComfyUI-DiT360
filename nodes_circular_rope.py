@@ -10,6 +10,8 @@ Supports: FLUX.1/2, Qwen-Image, Z-Image, and other DiT-based models.
 
 import torch
 import torch.nn as nn
+import copy
+import torch.nn.functional as F
 
 # Local imports
 try:
@@ -32,6 +34,77 @@ def find_rope_embedder(model):
     return None, None
 
 
+def _dit360_conv2d_forward_x_circular_y_constant(
+    self, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor
+) -> torch.Tensor:
+    """
+    Conv2d forward that applies circular padding on X and zero padding on Y.
+
+    This is equivalent to the approach used by ComfyUI_pytorch360convert.
+    """
+    x = F.pad(x, self._dit360_padding_values_x, mode="circular")
+    x = F.pad(x, self._dit360_padding_values_y, mode="constant", value=0)
+    return F.conv2d(
+        x,
+        weight,
+        bias,
+        self.stride,
+        (0, 0),  # padding is applied manually above
+        self.dilation,
+        self.groups,
+    )
+
+
+def _apply_circular_conv2d_padding(
+    root: nn.Module,
+    x_axis_only: bool = True,
+) -> int:
+    """
+    Patch Conv2d layers under `root` to use circular padding on the width axis.
+
+    Returns the number of Conv2d layers patched.
+    """
+    patched = 0
+
+    for layer in root.modules():
+        if not isinstance(layer, nn.Conv2d):
+            continue
+
+        if x_axis_only:
+            if hasattr(layer, "_dit360_original_conv_forward"):
+                continue
+
+            padding = getattr(layer, "_reversed_padding_repeated_twice", None)
+            if not (isinstance(padding, (tuple, list)) and len(padding) == 4):
+                # Fallback: derive symmetric padding from .padding
+                if isinstance(layer.padding, int):
+                    pad_h = pad_w = int(layer.padding)
+                else:
+                    pad_h = int(layer.padding[0])
+                    pad_w = int(layer.padding[1])
+                padding = (pad_w, pad_w, pad_h, pad_h)
+
+            pad_w = max(int(padding[0]), int(padding[1]))
+            if pad_w <= 0:
+                continue
+
+            layer._dit360_original_conv_forward = layer._conv_forward
+            layer._dit360_padding_values_x = (int(padding[0]), int(padding[1]), 0, 0)
+            layer._dit360_padding_values_y = (0, 0, int(padding[2]), int(padding[3]))
+            layer._conv_forward = _dit360_conv2d_forward_x_circular_y_constant.__get__(
+                layer, nn.Conv2d
+            )
+            patched += 1
+        else:
+            # NOTE: This wraps both axes, which is not ideal for equirectangular,
+            # but is provided for compatibility/testing.
+            if getattr(layer, "padding_mode", "zeros") != "circular":
+                layer.padding_mode = "circular"
+                patched += 1
+
+    return patched
+
+
 class ApplyCircularRoPE:
     """
     Apply Circular RoPE (Rotary Position Embeddings) to a model.
@@ -48,6 +121,14 @@ class ApplyCircularRoPE:
             },
             "optional": {
                 "enable": ("BOOLEAN", {"default": True}),
+                "mode": (["shift", "angle"], {"default": "shift"}),
+                "seam_width": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 4096,
+                    "tooltip": "Only for mode='shift': token columns near right edge to wrap (0=auto)"
+                }),
+                "verbose": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -56,7 +137,14 @@ class ApplyCircularRoPE:
     FUNCTION = "apply_circular_rope"
     CATEGORY = "DiT360/position_encoding"
 
-    def apply_circular_rope(self, model, enable: bool = True):
+    def apply_circular_rope(
+        self,
+        model,
+        enable: bool = True,
+        mode: str = "shift",
+        seam_width: int = 0,
+        verbose: bool = False,
+    ):
         if not enable:
             return (model,)
 
@@ -70,7 +158,13 @@ class ApplyCircularRoPE:
             return (model_clone,)
 
         # Create wrapped embedder
-        wrapped = create_circular_rope_wrapper(embedder, circular_axis=-1)
+        wrapped = create_circular_rope_wrapper(
+            embedder,
+            circular_axis=-1,
+            mode=mode,
+            seam_width=None if seam_width <= 0 else seam_width,
+            verbose=verbose,
+        )
 
         # Try add_object_patch first (preferred ComfyUI method)
         patched = False
@@ -108,6 +202,14 @@ class ApplyCircularPanorama:
             "optional": {
                 "patch_conv2d": ("BOOLEAN", {"default": True}),
                 "patch_rope": ("BOOLEAN", {"default": True}),
+                "rope_mode": (["shift", "angle"], {"default": "shift"}),
+                "rope_seam_width": ("INT", {
+                    "default": 0,
+                    "min": 0,
+                    "max": 4096,
+                    "tooltip": "Only for rope_mode='shift': token columns near right edge to wrap (0=auto)"
+                }),
+                "rope_verbose": ("BOOLEAN", {"default": False}),
             }
         }
 
@@ -121,9 +223,17 @@ class ApplyCircularPanorama:
         model,
         patch_conv2d: bool = True,
         patch_rope: bool = True,
+        rope_mode: str = "shift",
+        rope_seam_width: int = 0,
+        rope_verbose: bool = False,
     ):
         model_clone = model.clone()
         patches = []
+
+        # Legacy workflow compatibility: some older saved workflows pass model_type
+        # (e.g. "flux") into the first optional slot.
+        if isinstance(patch_conv2d, str):
+            patch_conv2d = True
 
         # Patch Conv2d layers for circular padding
         if patch_conv2d:
@@ -136,7 +246,13 @@ class ApplyCircularPanorama:
             attr_name, embedder = find_rope_embedder(model_clone)
 
             if embedder is not None:
-                wrapped = create_circular_rope_wrapper(embedder, circular_axis=-1)
+                wrapped = create_circular_rope_wrapper(
+                    embedder,
+                    circular_axis=-1,
+                    mode=rope_mode,
+                    seam_width=None if rope_seam_width <= 0 else rope_seam_width,
+                    verbose=rope_verbose,
+                )
 
                 # Try add_object_patch first
                 patched = False
@@ -229,13 +345,74 @@ class ApplyCircularPanorama:
         return patched
 
 
+class ApplyCircularPaddingVAE:
+    """
+    Patch a ComfyUI VAE so Conv2d layers use circular padding on the X axis.
+
+    This helps reduce the visible seam at the left/right boundary after decode.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "vae": ("VAE",),
+                "inplace": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Modify the loaded VAE (True) or a deep-copied VAE (False). If True, reload VAE to undo."
+                }),
+                "x_axis_only": ("BOOLEAN", {
+                    "default": True,
+                    "tooltip": "Apply circular padding only on X (recommended) or on both X and Y (not recommended for equirectangular)."
+                }),
+            }
+        }
+
+    RETURN_TYPES = ("VAE",)
+    RETURN_NAMES = ("vae",)
+    FUNCTION = "apply"
+    CATEGORY = "DiT360/vae"
+
+    def apply(self, vae, inplace: bool = True, x_axis_only: bool = True):
+        if inplace:
+            use_vae = vae
+        else:
+            try:
+                use_vae = copy.deepcopy(vae)
+            except Exception as e:
+                print(f"[CircularVAE] deepcopy failed, falling back to inplace=True: {e}")
+                use_vae = vae
+
+        # ComfyUI VAEs typically expose a `first_stage_model` containing Conv2d layers.
+        candidates = [
+            getattr(use_vae, "first_stage_model", None),
+            getattr(use_vae, "vae", None),
+            getattr(use_vae, "model", None),
+        ]
+        target = next((c for c in candidates if isinstance(c, nn.Module)), None)
+        if target is None:
+            if isinstance(use_vae, nn.Module):
+                target = use_vae
+            else:
+                print("[CircularVAE] Warning: Could not find a torch.nn.Module to patch on this VAE")
+                return (use_vae,)
+
+        patched = _apply_circular_conv2d_padding(target, x_axis_only=x_axis_only)
+        mode = "x-only" if x_axis_only else "x+y"
+        print(f"[CircularVAE] Patched {patched} Conv2d layers ({mode}).")
+
+        return (use_vae,)
+
+
 # Node registration
 NODE_CLASS_MAPPINGS = {
     "ApplyCircularRoPE": ApplyCircularRoPE,
     "ApplyCircularPanorama": ApplyCircularPanorama,
+    "ApplyCircularPaddingVAE": ApplyCircularPaddingVAE,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ApplyCircularRoPE": "Apply Circular RoPE",
     "ApplyCircularPanorama": "Apply Circular Panorama (All-in-One)",
+    "ApplyCircularPaddingVAE": "Apply Circular Padding VAE",
 }

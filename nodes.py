@@ -14,15 +14,16 @@ Nodes:
 
 import torch
 import math
+import uuid
+from pathlib import Path
 import numpy as np
 from PIL import Image
-import io
-import base64
 
 # ComfyUI imports
 import comfy.samplers
 import comfy.sample
 import comfy.utils
+import folder_paths
 
 # Our utilities
 from .utils import (
@@ -433,6 +434,7 @@ class Equirect360Viewer:
         """
 
         results = []
+        output_dir = folder_paths.get_temp_directory()
 
         for idx, image in enumerate(images):
             # Convert tensor to PIL Image (clamp to [0,1] first to avoid uint8 wrapping)
@@ -453,17 +455,10 @@ class Equirect360Viewer:
             if not validate_aspect_ratio(W, H, tolerance=0.05):
                 print(f"⚠️ Warning: Image {idx} is not 2:1 aspect ratio ({W}×{H} = {W/H:.2f}:1)")
 
-            # Convert to base64 JPEG for web display
-            buffer = io.BytesIO()
-            img_pil.save(buffer, format="JPEG", quality=90)
-            img_base64 = base64.b64encode(buffer.getvalue()).decode()
-
-            results.append({
-                "type": "equirect360",
-                "image": f"data:image/jpeg;base64,{img_base64}",
-                "width": img_pil.size[0],
-                "height": img_pil.size[1]
-            })
+            filename = f"dit360_viewer_{uuid.uuid4().hex}_{idx:05}.png"
+            filepath = Path(output_dir) / filename
+            img_pil.save(filepath, format="PNG", compress_level=1)
+            results.append({"filename": filename, "subfolder": "", "type": "temp"})
 
         print(f"🌐 Prepared {len(results)} panorama(s) for 360° viewing")
 
