@@ -23,6 +23,7 @@ from PIL import Image
 import comfy.samplers
 import comfy.sample
 import comfy.utils
+import latent_preview
 import folder_paths
 
 # Our utilities
@@ -225,6 +226,9 @@ class Equirect360KSampler:
             cube_loss_fn = CubeLoss(face_size=256, loss_type="l2")  # Use smaller face_size for speed
             print(f"🔄 Cube loss enabled (weight: {cube_loss_weight}) - generation will be ~1.5x slower")
 
+        # Use ComfyUI's native preview callback so websocket can stream step previews.
+        preview_callback = latent_preview.prepare_callback(model_clone, steps)
+
         # Create callback for loss application
         if enable_yaw_loss or enable_cube_loss:
             def loss_callback(step, x0, x, total_steps):
@@ -279,6 +283,13 @@ class Equirect360KSampler:
         else:
             loss_callback = None
 
+        def combined_callback(step, x0, x, total_steps):
+            # Keep callback order deterministic: first report preview/progress, then apply custom loss.
+            if preview_callback is not None:
+                preview_callback(step, x0, x, total_steps)
+            if loss_callback is not None:
+                loss_callback(step, x0, x, total_steps)
+
         # Get latent samples
         latent = latent_image["samples"]
 
@@ -302,7 +313,7 @@ class Equirect360KSampler:
             last_step=steps,
             force_full_denoise=True,
             seed=seed,
-            callback=loss_callback
+            callback=combined_callback
         )
 
         print(f"✅ Sampling complete: {samples.shape}")
